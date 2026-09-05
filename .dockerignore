@@ -1,0 +1,6 @@
+.git
+**/target
+.env
+infra/.terraform
+**/__pycache__
+.venv

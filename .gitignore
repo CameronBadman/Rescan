@@ -1,0 +1,11 @@
+**/target/
+.env
+.terraform/
+*.tfstate*
+*.tfplan
+*.auto.tfvars
+!*.auto.tfvars.example
+__pycache__/
+.venv/
+.pytest_cache/
+benchmark-results/
