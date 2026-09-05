@@ -13,10 +13,11 @@ dependencies = [
     "pypdf",
     "python-docx",
     "mcp>=2",
+    "boto3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest", "pytest-asyncio", "moto[s3]"]
 
 [build-system]
 requires = ["setuptools>=68"]

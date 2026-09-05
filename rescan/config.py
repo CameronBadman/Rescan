@@ -24,6 +24,19 @@ class Settings(BaseSettings):
     db_path: Path = REPO_ROOT / "data" / "rescan.db"
     upload_dir: Path = REPO_ROOT / "data" / "uploads"
 
+    # --- object store (where a job's resumes are pulled from) ---
+    # "s3" is any S3-compatible endpoint (MinIO, R2, AWS); "local" is a
+    # directory with the same <prefix>/<jobId>/ layout, for development.
+    object_store: str = "local"
+    local_object_store_dir: Path = REPO_ROOT / "data" / "bucket"
+    s3_endpoint_url: str = ""
+    s3_bucket: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_region: str = "auto"
+    # Objects for a job live under f"{s3_prefix}/{job_id}/".
+    s3_prefix: str = "jobs"
+
     # --- extraction ---
     tika_url: str = "http://localhost:9998"
     tika_timeout_s: float = 60.0

@@ -8,11 +8,9 @@ is the polling endpoint behind a progress view.
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import secrets
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any
@@ -25,6 +23,15 @@ from rescan.config import settings
 from rescan.dsl import DslError, parse_expr, parse_program
 from rescan.dsl.fields import reference as dsl_reference
 from rescan.extract import Extractor
+from rescan.ingest import (
+    ALLOWED_SUFFIXES,  # noqa: F401 - re-exported for callers of this module
+    MAX_UNPACKED_BYTES,  # noqa: F401
+    ObjectStore,
+    ObjectStoreError,
+    build_object_store,
+    expand_uploads,
+    pull_job_documents,
+)
 from rescan.llm.client import build_client
 from rescan.pipeline.query import QueryRejected, run_query
 from rescan.pipeline.runner import PipelineRunner
@@ -34,17 +41,11 @@ from rescan.store import Store
 
 log = logging.getLogger(__name__)
 
-# Archive members we will not unpack, and a ceiling on how much we will expand.
-SKIP_PREFIXES = ("__MACOSX/", ".")
-ALLOWED_SUFFIXES = {".pdf", ".doc", ".docx", ".txt", ".rtf", ".odt", ".md", ".html", ".htm",
-                    ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
-MAX_UNPACKED_BYTES = 512 * 1024 * 1024
-
-
 class AppState:
     store: Store
     runner: PipelineRunner
     pool: ThreadPoolExecutor
+    object_store: ObjectStore
 
 
 state = AppState()
@@ -56,13 +57,17 @@ async def lifespan(app: FastAPI):
     state.store = Store()
     client = build_client()
     state.runner = PipelineRunner(state.store, client, Extractor())
+    state.object_store = build_object_store()
     state.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rescan-job")
     if not settings.api_keys:
         log.warning(
             "RESCAN_API_KEYS is empty: the API is unauthenticated. Set it before "
             "exposing this service beyond localhost."
         )
-    log.info("rescan API ready (llm backend=%s)", settings.llm_backend)
+    log.info(
+        "rescan API ready (llm backend=%s, object store=%s)",
+        settings.llm_backend, getattr(state.object_store, "name", settings.object_store),
+    )
     yield
     state.pool.shutdown(wait=False, cancel_futures=True)
     state.store.close()
@@ -133,6 +138,14 @@ class DslParseRequest(BaseModel):
     dsl: str = Field(description="A rule program (REQUIRE/PREFER clauses) or a bare query expression.")
 
 
+class BucketJobRequest(BaseModel):
+    job_id: str = Field(description="The job's folder in the bucket: objects under <prefix>/<job_id>/ are pulled.")
+    role: RoleSpec
+    plan: str | None = Field(default=None, description="The recruiter's hiring plan, free text.")
+    rules: list[str] = Field(default_factory=list, description="Discrete rules, in addition to or instead of the plan.")
+    prefix: str | None = Field(default=None, description="Override the configured bucket prefix for this job.")
+
+
 class QueryRequest(BaseModel):
     dsl: str = Field(description="A bare expression in the rule language, e.g. years_experience >= 5 AND skills HAS ANY (\"Python\").")
     model_checks: bool = Field(default=True, description="Whether ASK clauses are put to the model. Off, they evaluate to unknown.")
@@ -147,55 +160,6 @@ class JobStatusResponse(BaseModel):
     created_at: str
     updated_at: str
     error: str | None = None
-
-
-# --------------------------------------------------------------------------
-# Upload handling
-# --------------------------------------------------------------------------
-
-
-def _is_usable(name: str) -> bool:
-    from pathlib import Path
-
-    if any(name.startswith(prefix) for prefix in SKIP_PREFIXES) or name.endswith("/"):
-        return False
-    stem = Path(name).name
-    if not stem or stem.startswith("."):
-        return False
-    return Path(name).suffix.lower() in ALLOWED_SUFFIXES
-
-
-def expand_uploads(uploads: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
-    """Flatten zip archives into individual documents.
-
-    Bulk uploads arrive as a zip of a folder as often as a multi-file
-    selection, so both are accepted at the same endpoint.
-    """
-    expanded: list[tuple[str, bytes]] = []
-    unpacked = 0
-
-    for filename, data in uploads:
-        if not filename.lower().endswith(".zip"):
-            expanded.append((filename, data))
-            continue
-        try:
-            archive = zipfile.ZipFile(io.BytesIO(data))
-        except zipfile.BadZipFile:
-            log.warning("skipping unreadable archive %s", filename)
-            continue
-        for info in archive.infolist():
-            if info.is_dir() or not _is_usable(info.filename):
-                continue
-            # Guard against a zip bomb rather than trusting the declared size.
-            if unpacked + info.file_size > MAX_UNPACKED_BYTES:
-                log.warning("archive %s exceeded the unpack limit; remaining members skipped", filename)
-                break
-            member = archive.read(info)
-            unpacked += len(member)
-            from pathlib import Path
-
-            expanded.append((Path(info.filename).name, member))
-    return expanded
 
 
 # --------------------------------------------------------------------------
@@ -327,6 +291,52 @@ async def create_job(
     return {
         "job_id": job_id,
         "accepted_documents": len(documents),
+        "status_url": f"/jobs/{job_id}/status",
+    }
+
+
+@app.post("/jobs/from-bucket", status_code=202)
+def create_job_from_bucket(request: BucketJobRequest) -> dict[str, Any]:
+    """Start a job from resumes already in the object store.
+
+    Objects under `<prefix>/<job_id>/` are pulled, archives expanded, and the
+    job runs exactly as an upload would. The bucket's job id becomes the
+    Rescan job id so the frontend can correlate the two without a mapping.
+    """
+    job_id = request.job_id.strip().strip("/")
+    if not job_id or "/" in job_id or job_id.startswith("."):
+        raise HTTPException(status_code=400, detail="job_id must be a single path segment")
+    if state.store.get_job(job_id) is not None:
+        raise HTTPException(status_code=409, detail=f"job {job_id!r} already exists")
+
+    try:
+        pull = pull_job_documents(state.object_store, job_id, prefix=request.prefix)
+    except ObjectStoreError as exc:
+        raise HTTPException(status_code=502, detail=f"object store error: {exc}") from exc
+    if not pull.documents:
+        raise HTTPException(
+            status_code=404,
+            detail={"message": f"no usable documents under {pull.prefix!r}", "skipped": pull.skipped},
+        )
+
+    state.runner.create_job(request.role, pull.documents, job_id=job_id)
+    state.store.audit(
+        job_id, "ingestion", "bucket_pulled",
+        detail={
+            "store": getattr(state.object_store, "name", settings.object_store),
+            "prefix": pull.prefix,
+            "keys": pull.keys,
+            "documents": len(pull.documents),
+            "bytes": pull.bytes_pulled,
+            "skipped": pull.skipped,
+        },
+    )
+    state.pool.submit(_run_job_safely, job_id, request.rules, request.plan)
+    return {
+        "job_id": job_id,
+        "prefix": pull.prefix,
+        "accepted_documents": len(pull.documents),
+        "skipped": pull.skipped,
         "status_url": f"/jobs/{job_id}/status",
     }
 
