@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rescan result v1",
+  "type": "object",
+  "required": ["schemaVersion", "jobId", "documentId", "filename", "mediaType", "text", "metadata", "extractionMethod", "ocrUsed", "warnings", "processedAt"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "jobId": {"type": "string", "format": "uuid"},
+    "documentId": {"type": "string", "format": "uuid"},
+    "filename": {"type": "string"},
+    "mediaType": {"type": "string"},
+    "text": {"type": "string", "minLength": 1},
+    "metadata": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+    "extractionMethod": {"enum": ["TIKA", "VIT", "TIKA_VIT"]},
+    "ocrUsed": {"type": "boolean"},
+    "modelRevision": {"type": "string"},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "processedAt": {"type": "string", "format": "date-time"},
+    "pages": {"type": "array", "items": {
+      "type": "object", "required": ["page", "text", "method"],
+      "properties": {
+        "page": {"type": "integer", "minimum": 1},
+        "text": {"type": "string"},
+        "method": {"enum": ["TIKA", "VIT"]},
+        "width": {"type": "integer"}, "height": {"type": "integer"},
+        "lines": {"type": "array", "items": {
+          "type": "object", "required": ["text", "bbox"],
+          "properties": {"text": {"type": "string"}, "bbox": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer"}}}
+        }}
+      }
+    }}
+  }
+}

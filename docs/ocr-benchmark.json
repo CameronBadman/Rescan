@@ -1,0 +1,14 @@
+{
+  "date": "2026-09-06",
+  "environment": "Local CPU container, non-root user, network disabled; not an AWS throughput test",
+  "fixture": "Synthetic printed English, DejaVu Sans 42px, three lines",
+  "expected": "Jane Doe\nSoftware Engineer\nJava and PostgreSQL",
+  "actual": "JANE DUE\nSOFTWARE ENGINEER\nJAVA AND POSTGRESQL",
+  "characterErrorRate": 0.6739130434782609,
+  "caseInsensitiveCharacterErrorRate": 0.021739130434782608,
+  "elapsedSeconds": 23.108528022999963,
+  "peakRssKiB": 2412364,
+  "numBeams": 4,
+  "modelRevision": "93450be3f1ed40a930690d951ef3932687cc1892",
+  "limitation": "This checkpoint normalized case and misread Doe as DUE. Evaluate real resume fixtures before relying on names or exact spelling."
+}
