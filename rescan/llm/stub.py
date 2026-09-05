@@ -873,6 +873,61 @@ def handle_compile_dsl_repair(request: LLMRequest) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# Model checks (ASK "...")
+# --------------------------------------------------------------------------
+
+JUDGE_STOPWORDS = {
+    "candidate", "does", "have", "has", "had", "the", "this", "that", "with", "from", "their",
+    "they", "them", "been", "were", "was", "any", "for", "and", "led", "into", "over", "more",
+    "than", "year", "years", "ever", "worked", "experience", "experienced", "ability", "able",
+}
+
+
+def _strings_in(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings_in(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings_in(v)]
+    return []
+
+
+def handle_judge(request: LLMRequest) -> dict[str, Any]:
+    """Keyword heuristic: 'yes' when the profile plainly mentions what is asked,
+    quoting the line it found; otherwise 'unknown'. Never 'no' — a stub must
+    not exclude anyone on a guess."""
+    question = request.context.get("question", "")
+    profile = request.context.get("profile", {})
+    if not question.strip():
+        raise LLMError("judge: empty question")
+
+    words = [w for w in re.findall(r"[a-z][a-z-]{3,}", question.lower()) if w not in JUDGE_STOPWORDS]
+    stems = {w[:-1] if w.endswith("s") else w for w in words}
+    best: tuple[int, str] | None = None
+    for text in _strings_in(profile):
+        lowered = text.lower()
+        hits = sum(1 for stem in stems if stem in lowered)
+        if hits and (best is None or hits > best[0]):
+            best = (hits, text)
+
+    needed = 1 if len(stems) <= 2 else 2
+    if best is not None and best[0] >= needed:
+        return {
+            "reasoning": f"The profile mentions {best[0]} of the terms asked about.",
+            "answer": "yes",
+            "evidence": best[1][:200],
+            "declined_reason": None,
+        }
+    return {
+        "reasoning": "The profile does not mention what was asked.",
+        "answer": "unknown",
+        "evidence": None,
+        "declined_reason": None,
+    }
+
+
+# --------------------------------------------------------------------------
 # Ranking
 # --------------------------------------------------------------------------
 
@@ -985,6 +1040,7 @@ HANDLERS: dict[str, Callable[[LLMRequest], dict[str, Any]]] = {
     "anonymize": handle_anonymize,
     "compile_dsl": handle_compile_dsl,
     "compile_dsl_repair": handle_compile_dsl_repair,
+    "judge": handle_judge,
     "rank": handle_rank,
 }
 

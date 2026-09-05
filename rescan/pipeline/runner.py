@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from rescan.config import settings
+from rescan.dsl.judge import Judge
 from rescan.extract import Extractor, content_hash
 from rescan.llm.client import LLMClient
 from rescan.pipeline.anonymize import AnonymizationError, anonymize_resume
@@ -282,7 +283,7 @@ class PipelineRunner:
 
         # --- screen ---
         self.store.update_candidate(candidate_id, status=CandidateStatus.SCREENING.value)
-        result = screen(profile, rule_set)
+        result = screen(profile, rule_set, self._judge_for(job_id, candidate_id))
         self.store.update_candidate(candidate_id, screening_json=json.dumps(result.to_dict(), default=str))
         self.store.audit_many([
             (job_id, candidate_id, "screening",
@@ -300,6 +301,21 @@ class PipelineRunner:
             self.store.update_candidate(candidate_id, status=CandidateStatus.COMPLETE.value)
 
         return profile, result
+
+    def _judge_for(self, job_id: str, candidate_id: str | None, *, ensemble: bool | None = None) -> Judge:
+        """A judge for ASK clauses that writes every model check to the audit trail.
+
+        Requirements use the ensemble so a model-judged exclusion needs agreement;
+        preferences take a single answer because they only order candidates.
+        """
+        def record(result, profile):
+            self.store.audit(
+                job_id, "screening", "model_check",
+                candidate_id=candidate_id,
+                detail={"candidate_ref": profile.candidate_ref, **result.to_dict()},
+            )
+
+        return Judge(self.client, ensemble=self.use_ensemble if ensemble is None else ensemble, on_check=record)
 
     def _rank(self, job_id, role, profiles, screening):
         eligible = [

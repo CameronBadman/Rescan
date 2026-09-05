@@ -325,7 +325,12 @@ def anonymize_user_prompt(profile_json: str) -> str:
 # --------------------------------------------------------------------------
 
 from rescan.dsl.fields import reference_text as _dsl_reference  # noqa: E402
+from rescan.rules.statutes import PROTECTED_ATTRIBUTES as _PROTECTED  # noqa: E402
 from rescan.rules.statutes import legal_brief as _legal_brief  # noqa: E402
+
+
+def _protected_attributes() -> tuple[str, ...]:
+    return _PROTECTED
 
 COMPILE_DSL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -478,6 +483,58 @@ def compile_dsl_repair_user_prompt(source_text: str, dsl: str, errors: list[str]
     return (
         f"Requirement: {source_text}\n\nRejected clause:\n{dsl}\n\nParser errors:\n{error_text}"
     )
+
+
+# --------------------------------------------------------------------------
+# Pass 3b — a check the model makes itself (ASK "...")
+# --------------------------------------------------------------------------
+
+JUDGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["reasoning", "answer", "evidence", "declined_reason"],
+    "properties": {
+        "reasoning": {
+            "type": "string",
+            "description": "What in the profile bears on the question, before deciding.",
+        },
+        "answer": {
+            "type": "string",
+            "enum": ["yes", "no", "unknown"],
+            "description": "'unknown' when the profile does not say, or when answering would require inferring a protected attribute.",
+        },
+        "evidence": _str_or_null(
+            "A verbatim quotation from the profile that supports a yes or a no. Null for unknown. "
+            "An answer without a quotation will be treated as unknown."
+        ),
+        "declined_reason": _str_or_null(
+            "When you decline to answer because it would require inferring a protected attribute, say which."
+        ),
+    },
+}
+
+JUDGE_SYSTEM = f"""You answer one yes/no question about a candidate from their anonymized profile,
+for a recruitment screening rule.
+
+The profile is de-identified: no name, institution, employer name, suburb or
+graduation year. Do not speculate about any of them.
+
+Rules:
+- Answer from the profile alone. Quote the text that supports your answer,
+  verbatim. An answer without a quotation is discarded.
+- If the profile does not say, answer "unknown". Silence is not a "no".
+- If answering would require inferring a protected attribute — race, national
+  origin, sex, age, disability, religion, family responsibilities — or a proxy
+  for one, answer "unknown" and give the reason in declined_reason.
+- Judge only what is asked. Do not weigh unrelated strengths or weaknesses.
+
+Protected attributes: {", ".join(_protected_attributes())}.
+
+Return JSON only."""
+
+
+def judge_user_prompt(question: str, profile_text: str) -> str:
+    return f"Question: {question}\n\nAnonymized candidate profile:\n{profile_text}"
 
 
 # --------------------------------------------------------------------------
