@@ -23,7 +23,8 @@ from rescan.config import settings
 from rescan.extract import Extractor, content_hash
 from rescan.llm.client import LLMClient
 from rescan.pipeline.anonymize import AnonymizationError, anonymize_resume
-from rescan.pipeline.rank import build_shortlist, triage_rank
+from rescan.pipeline.ensemble import ensemble_pass
+from rescan.pipeline.rank import borderline_refs, build_shortlist, triage_rank
 from rescan.pipeline.structure import StructuringError, structure_resume
 from rescan.rules.classifier import classify_rules
 from rescan.rules.engine import ScreeningResult, screen
@@ -45,11 +46,13 @@ class PipelineRunner:
         client: LLMClient,
         extractor: Extractor | None = None,
         workers: int | None = None,
+        use_ensemble: bool = True,
     ) -> None:
         self.store = store
         self.client = client
         self.extractor = extractor if extractor is not None else Extractor()
         self.workers = workers or settings.pipeline_workers
+        self.use_ensemble = use_ensemble
 
     # ------------------------------------------------------------------
     # Intake
@@ -292,6 +295,7 @@ class PipelineRunner:
             detail={"eligible": len(eligible), "screened": len(profiles)},
         )
         scores = triage_rank(eligible, role, self.client) if eligible else []
+        scores = self._ensemble(job_id, role, scores, eligible, screening)
 
         for score in scores:
             candidate_id = self._candidate_id_for(job_id, score.candidate_ref)
@@ -312,6 +316,54 @@ class PipelineRunner:
         shortlist = build_shortlist(scores, role, screening=screening)
         self.store.update_job(job_id, shortlist_json=shortlist.model_dump_json())
         return shortlist
+
+    def _ensemble(self, job_id, role, scores, eligible, screening):
+        """Re-score only the candidates whose placement is genuinely in doubt."""
+        if not self.use_ensemble or not scores:
+            return scores
+
+        borderline = borderline_refs(scores)
+        # A rule the engine could not decide is exactly where a second opinion
+        # is worth paying for, so those candidates join the borderline set.
+        ambiguous = {
+            ref for ref, result in screening.items() if result.needs_manual_review
+        }
+        targets = borderline | (ambiguous & {score.candidate_ref for score in scores})
+        if not targets:
+            self.store.audit(job_id, "ranking", "ensemble_skipped",
+                             detail={"reason": "no borderline or ambiguous candidates"})
+            return scores
+
+        self.store.audit(
+            job_id, "ranking", "ensemble_started",
+            detail={
+                "candidates": sorted(targets),
+                "borderline": sorted(borderline),
+                "rule_ambiguous": sorted(ambiguous & targets),
+                "of_total": len(scores),
+            },
+        )
+
+        profiles_by_ref = {profile.candidate_ref: profile for profile in eligible}
+        rescored = ensemble_pass(scores, profiles_by_ref, role, self.client, targets)
+
+        for score in rescored:
+            if score.pass_name != "ensemble" or not score.ensemble_votes:
+                continue
+            summary = next(
+                (vote["summary"] for vote in score.ensemble_votes if "summary" in vote), {}
+            )
+            self.store.audit(
+                job_id, "ranking",
+                "ensemble_tiebreak" if not summary.get("unanimous", True) else "ensemble_agreed",
+                candidate_id=self._candidate_id_for(job_id, score.candidate_ref),
+                detail={
+                    "candidate_ref": score.candidate_ref,
+                    "votes": [vote for vote in score.ensemble_votes if "summary" not in vote],
+                    **summary,
+                },
+            )
+        return rescored
 
     # ------------------------------------------------------------------
     # Failure paths
