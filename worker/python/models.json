@@ -1,0 +1,4 @@
+{
+  "recognizer": {"repo": "microsoft/trocr-base-printed", "revision": "93450be3f1ed40a930690d951ef3932687cc1892"},
+  "detector": {"repo": "PaddlePaddle/PP-OCRv5_mobile_det", "revision": "0d63e78e2b680928f6b1747d76a08db6e645efb7"}
+}
