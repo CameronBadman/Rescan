@@ -10,7 +10,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 
 @Configuration
 public class Infrastructure {
@@ -28,12 +27,8 @@ public class Infrastructure {
     config.setUsername(Settings.get("DATABASE_USER", "rescan"));
     String secret = Settings.get("DATABASE_SECRET_ARN", "");
     if (!secret.isEmpty()) {
-      try (var client = SecretsManagerClient.create()) {
-        var credentials =
-            json.readTree(client.getSecretValue(r -> r.secretId(secret)).secretString());
-        config.setUsername(credentials.get("username").asText());
-        config.setPassword(credentials.get("password").asText());
-      }
+      config.setDataSource(new ManagedSecretDataSource(config.getJdbcUrl(), secret, json));
+      config.setJdbcUrl(null);
     } else config.setPassword(Settings.require("DATABASE_PASSWORD"));
     config.setMaximumPoolSize(Settings.integer("DATABASE_POOL_SIZE", 5));
     return new HikariDataSource(config);
