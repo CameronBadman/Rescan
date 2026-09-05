@@ -74,7 +74,7 @@ def test_rule_check_flags_risky_language_with_a_rewrite(client):
 def test_rule_check_passes_capability_rules_through(client):
     body = client.post("/rules/check", json={"rules": ["At least 5 years experience"]}).json()
     assert body["applied"] == 1 and body["flagged"] == 0
-    assert body["rules"][0]["predicate"]["field"] == "total_years_experience"
+    assert body["rules"][0]["dsl"] == "REQUIRE years_experience >= 5"
 
 
 def test_rule_check_rejects_an_empty_request(client):

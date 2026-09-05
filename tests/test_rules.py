@@ -1,8 +1,10 @@
 import pytest
 
+from rescan.dsl import parse_expr
+from rescan.dsl.eval import evaluate
 from rescan.rules.classifier import classify_rule, classify_rules, scan_patterns
-from rescan.rules.engine import evaluate_predicate, screen
-from rescan.rules.models import Predicate, RuleVerdict
+from rescan.rules.engine import screen
+from rescan.rules.models import RuleVerdict
 from rescan.rules.statutes import RiskLevel
 from rescan.schemas import AnonymizedProfile, Qualification, Skill, WorkRights, WorkRightsStatus
 
@@ -62,7 +64,7 @@ def test_a_high_risk_rule_is_never_applied(llm):
     # from screening candidates is the risk finding.
     rule = classify_rule("Must hold an Australian university degree", llm)
     assert rule.verdict is RuleVerdict.RISKY
-    assert rule.predicate is None, "a flagged rule must not survive as a filter"
+    assert rule.clause is None, "a flagged rule must not survive as a filter"
     assert not rule.is_applied
     assert any("not applied" in note for note in rule.notes)
 
@@ -130,11 +132,13 @@ def profile(**kwargs) -> AnonymizedProfile:
     return AnonymizedProfile(**defaults)
 
 
+def check(text: str, candidate: AnonymizedProfile):
+    verdict = evaluate(parse_expr(text), candidate)
+    return verdict.value, verdict.observed, verdict.reason
+
+
 def test_numeric_rule_explains_itself_with_the_observed_value():
-    predicate = Predicate(
-        field="total_years_experience", operator="gte", value=5, description="At least 5 years."
-    )
-    passed, observed, reason = evaluate_predicate(predicate, profile(total_years_experience=3.0))
+    passed, observed, reason = check("years_experience >= 5", profile(total_years_experience=3.0))
     assert passed is False
     assert observed == 3.0
     assert "3 years of professional experience" in reason
@@ -142,35 +146,25 @@ def test_numeric_rule_explains_itself_with_the_observed_value():
 
 
 def test_missing_value_routes_to_review_rather_than_rejecting():
-    predicate = Predicate(
-        field="total_years_experience", operator="gte", value=5, description="At least 5 years."
-    )
-    passed, _, reason = evaluate_predicate(predicate, profile(total_years_experience=None))
+    passed, _, reason = check("years_experience >= 5", profile(total_years_experience=None))
     assert passed is None, "silence in a resume must not count as evidence against a candidate"
     assert "manual review" in reason
 
 
 def test_skill_matching_is_loose_enough_for_real_resumes():
-    predicate = Predicate(
-        field="skills", operator="contains_any", value=["AWS"], description="AWS."
-    )
-    passed, _, _ = evaluate_predicate(predicate, profile(skills=[Skill(name="AWS Solutions Architect")]))
+    passed, _, _ = check('skills HAS ANY ("AWS")', profile(skills=[Skill(name="AWS Solutions Architect")]))
     assert passed is True
 
 
 def test_contains_all_names_what_was_missing():
-    predicate = Predicate(
-        field="skills", operator="contains_all", value=["Go", "Rust"], description="Go and Rust."
-    )
-    passed, _, reason = evaluate_predicate(predicate, profile(skills=[Skill(name="Go")]))
+    passed, _, reason = check('skills HAS ALL ("Go", "Rust")', profile(skills=[Skill(name="Go")]))
     assert passed is False
     assert "Rust" in reason
 
 
 def test_aqf_rule_uses_the_deterministic_level():
-    predicate = Predicate(field="highest_aqf", operator="gte", value=7, description="Bachelor.")
     candidate = profile(qualifications=[Qualification(title="Master of IT", aqf_level=9)])
-    passed, _, reason = evaluate_predicate(predicate, candidate)
+    passed, _, reason = check("aqf >= 7", candidate)
     assert passed is True
     assert "AQF level 9" in reason
 

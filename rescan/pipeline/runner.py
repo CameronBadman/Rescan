@@ -26,7 +26,7 @@ from rescan.pipeline.anonymize import AnonymizationError, anonymize_resume
 from rescan.pipeline.ensemble import ensemble_pass
 from rescan.pipeline.rank import borderline_refs, build_shortlist, triage_rank
 from rescan.pipeline.structure import StructuringError, structure_resume
-from rescan.rules.classifier import classify_rules
+from rescan.rules.classifier import compile_plan
 from rescan.rules.engine import ScreeningResult, screen
 from rescan.schemas import (
     AnonymizedProfile,
@@ -100,7 +100,9 @@ class PipelineRunner:
     # Execution
     # ------------------------------------------------------------------
 
-    def run_job(self, job_id: str, rule_texts: Sequence[str]) -> dict[str, Any]:
+    def run_job(
+        self, job_id: str, rule_texts: Sequence[str], plan: str | None = None
+    ) -> dict[str, Any]:
         """Run a job to completion. Blocking; callers run it in a background task."""
         job = self.store.get_job(job_id)
         if job is None:
@@ -110,7 +112,7 @@ class PipelineRunner:
         self.store.update_job(job_id, status=JobStatus.RUNNING.value)
 
         try:
-            rule_set = self._classify_rules(job_id, rule_texts, role)
+            rule_set = self._classify_rules(job_id, rule_texts, role, plan)
             profiles, screening = self._process_candidates(job_id, rule_set)
             shortlist = self._rank(job_id, role, profiles, screening)
         except Exception as exc:  # a job failure must be visible, not silent
@@ -126,11 +128,22 @@ class PipelineRunner:
         )
         return shortlist.model_dump(mode="json")
 
-    def _classify_rules(self, job_id: str, rule_texts: Sequence[str], role: RoleSpec):
-        rule_set = classify_rules(list(rule_texts), self.client, role_context=role.title)
+    def _classify_rules(
+        self, job_id: str, rule_texts: Sequence[str], role: RoleSpec, plan: str | None = None
+    ):
+        rule_set = compile_plan(plan, self.client, rule_texts=list(rule_texts), role_context=role.title)
         self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
 
-        entries = []
+        entries = [(
+            job_id, None, "rules", "plan_compiled",
+            {
+                "plan": rule_set.source_plan,
+                "reasoning": rule_set.reasoning,
+                "rules": len(rule_set.rules),
+                "applied": len(rule_set.applied),
+                "flagged": len(rule_set.flagged),
+            },
+        )]
         for rule in rule_set.rules:
             entries.append((
                 job_id, None, "rules",
@@ -138,8 +151,11 @@ class PipelineRunner:
                 {
                     "rule_id": rule.id,
                     "text": rule.source_text,
+                    "kind": rule.kind,
                     "risk": rule.risk.value,
-                    "predicate": rule.predicate.model_dump(mode="json") if rule.predicate else None,
+                    "dsl": rule.dsl,
+                    "clause": rule.clause.model_dump(mode="json") if rule.clause else None,
+                    "justification": rule.justification,
                     "notes": rule.notes,
                 },
             ))
@@ -271,8 +287,8 @@ class PipelineRunner:
         self.store.audit_many([
             (job_id, candidate_id, "screening",
              {True: "rule_passed", False: "rule_failed", None: "rule_indeterminate"}[outcome.passed],
-             {"rule_id": outcome.rule_id, "rule": outcome.source_text, "field": outcome.field,
-              "observed": outcome.observed, "reason": outcome.reason})
+             {"rule_id": outcome.rule_id, "rule": outcome.source_text, "dsl": outcome.dsl,
+              "fields": outcome.fields, "observed": outcome.observed, "reason": outcome.reason})
             for outcome in result.outcomes
         ])
 

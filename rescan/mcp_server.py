@@ -49,7 +49,14 @@ def _rule_payload(rule) -> dict[str, Any]:
         "verdict": rule.verdict.value,
         "risk": rule.risk.value,
         "applied_automatically": rule.is_applied,
-        "test": rule.predicate.model_dump(mode="json") if rule.predicate else None,
+        "kind": rule.kind,
+        "test": (
+            {"dsl": rule.dsl, "clause": rule.clause.model_dump(mode="json")}
+            if rule.clause is not None
+            else None
+        ),
+        "justification": rule.justification,
+        "legal_basis": rule.legal_basis,
         "findings": [
             {
                 "matched_text": finding.matched_text,

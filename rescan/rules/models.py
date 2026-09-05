@@ -1,9 +1,9 @@
-"""Rule data contracts and the predicate vocabulary.
+"""Rule data contracts.
 
-The predicate vocabulary is deliberately small and closed. A recruiter rule is
-only applied automatically when it compiles into one of these fields and
-operators, which is what makes every exclusion explainable in terms of a
-structured value rather than a score.
+A recruiter rule is applied automatically only when it compiles into the rule
+language (`rescan.dsl`), whose vocabulary is closed and whose forbidden
+identifiers carry a statute. That is what makes every exclusion explainable in
+terms of a structured value rather than a score.
 """
 
 from __future__ import annotations
@@ -13,37 +13,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from rescan.dsl.ast import Clause
 from rescan.rules.statutes import RiskLevel
 
 
 class RuleVerdict(str, Enum):
-    # Maps cleanly to a structured field and is applied automatically.
+    # Compiles into the rule language and is applied automatically.
     APPLICABLE = "applicable"
     # Reads as a proxy for a protected attribute; not applied as written.
     RISKY = "risky"
     # Lawful but not mechanisable; passed to the human reviewer as a note.
     UNMAPPABLE = "unmappable"
-
-
-# Fields a rule may test. Each maps to a value on the anonymized profile.
-PREDICATE_FIELDS: dict[str, str] = {
-    "total_years_experience": "Years of professional experience (number).",
-    "highest_aqf": "Highest qualification as an AQF level 1-10 (number).",
-    "skills": "List of skill names.",
-    "languages": "List of languages the candidate uses.",
-    "certifications": "List of certifications held.",
-    "work_rights_unrestricted": "Whether the candidate holds unrestricted work rights (boolean).",
-    "work_rights_status": "Work rights status (citizen, permanent_resident, visa_unrestricted, visa_restricted, requires_sponsorship, unknown).",
-}
-
-Operator = Literal["gte", "lte", "eq", "contains_all", "contains_any", "in", "is_true", "is_false"]
-
-
-class Predicate(BaseModel):
-    field: str
-    operator: Operator
-    value: Any = None
-    description: str = Field(description="Plain-language statement of what this tests.")
 
 
 class RuleFinding(BaseModel):
@@ -65,13 +45,20 @@ class ClassifiedRule(BaseModel):
     verdict: RuleVerdict
     risk: RiskLevel = RiskLevel.NONE
     findings: list[RuleFinding] = Field(default_factory=list)
-    predicate: Predicate | None = None
+    # The compiled rule, in canonical text and as a tree. Absent when the rule
+    # was flagged, could not be compiled, or the model was unavailable.
+    dsl: str | None = None
+    clause: Clause | None = None
+    kind: Literal["require", "prefer"] = "require"
+    # The model's job-based reason for the requirement, kept for the audit trail.
+    justification: str | None = None
+    legal_basis: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
     @property
     def is_applied(self) -> bool:
-        """Whether this rule actually filters candidates."""
-        return self.verdict is RuleVerdict.APPLICABLE and self.predicate is not None
+        """Whether this rule actually filters or ranks candidates."""
+        return self.verdict is RuleVerdict.APPLICABLE and self.clause is not None
 
     @property
     def blocking_findings(self) -> list[RuleFinding]:
@@ -83,7 +70,8 @@ class RuleOutcome(BaseModel):
 
     rule_id: str
     source_text: str
-    field: str
+    dsl: str
+    fields: list[str] = Field(default_factory=list)
     # None means "could not be determined" — never an automatic exclusion.
     passed: bool | None
     observed: Any = None
@@ -92,10 +80,22 @@ class RuleOutcome(BaseModel):
 
 class RuleSet(BaseModel):
     rules: list[ClassifiedRule] = Field(default_factory=list)
+    # The model's reasoning over the plan: what the role needs, which phrases
+    # were proxies and why. Stored so a reviewer can see how the rules arose.
+    reasoning: str | None = None
+    source_plan: str | None = None
 
     @property
     def applied(self) -> list[ClassifiedRule]:
         return [rule for rule in self.rules if rule.is_applied]
+
+    @property
+    def requirements(self) -> list[ClassifiedRule]:
+        return [rule for rule in self.applied if rule.kind == "require"]
+
+    @property
+    def preferences(self) -> list[ClassifiedRule]:
+        return [rule for rule in self.applied if rule.kind == "prefer"]
 
     @property
     def flagged(self) -> list[ClassifiedRule]:

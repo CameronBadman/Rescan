@@ -278,6 +278,24 @@ RISK_PATTERNS: list[RiskPattern] = [
         rewrite="Remove the requirement. Screen on the skills and experience the role needs.",
     ),
     RiskPattern(
+        id="employer_prestige",
+        pattern=_compile(
+            r"\b(leading|top[- ]tier|tier[- ]1|prestigious|well[- ]known|big[- ]?(4|four)|faang|blue[- ]chip|reputable|major)"
+            r"\s+(compan(y|ies)|firms?|employers?|brands?|organisations?|organizations?|consultanc(y|ies)|tech)\b"
+        ),
+        risk=RiskLevel.REVIEW,
+        attributes=("social origin", "national or ethnic origin"),
+        statutes=("RDA_1975", "ADA_QLD_1991"),
+        explanation=(
+            "'Leading company' is an unvalidated prestige proxy: it rewards where "
+            "someone worked rather than what they can do, and penalises overseas "
+            "and smaller-market experience, which tracks national and social origin. "
+            + INDIRECT_DISCRIMINATION_NOTE
+        ),
+        rewrite="State the experience itself, e.g. '3+ years of relevant product design experience' or 'has shipped a product used by external customers'.",
+        field_alternative="years_experience",
+    ),
+    RiskPattern(
         id="postcode_or_suburb",
         pattern=_compile(r"\b(lives? in|located in|resident of|from)\s+(the\s+)?(inner|northern|southern|eastern|western)\b|\bpostcode\b|\bgood suburb\b"),
         risk=RiskLevel.REVIEW,
@@ -295,3 +313,26 @@ RISK_PATTERNS: list[RiskPattern] = [
 
 def statute_citations(codes: tuple[str, ...] | list[str]) -> list[str]:
     return [STATUTES[code] for code in codes if code in STATUTES]
+
+
+PROTECTED_ATTRIBUTES = (
+    "race", "colour", "national or ethnic origin", "sex", "sexual orientation",
+    "gender identity", "age", "disability", "marital or relationship status",
+    "pregnancy", "family or carer's responsibilities", "religion",
+    "political opinion", "social origin",
+)
+
+
+def legal_brief() -> str:
+    """The legal standing rendered for a prompt: statutes, the doctrine, and
+    every phrasing the deterministic table flags, with its rewrite."""
+    lines = ["PROTECTED ATTRIBUTES: " + ", ".join(PROTECTED_ATTRIBUTES), "", "STATUTES"]
+    lines.extend(f"- {code}: {citation}" for code, citation in STATUTES.items())
+    lines.extend(["", INDIRECT_DISCRIMINATION_NOTE, "",
+                  "KNOWN RISKY PHRASINGS (flagged deterministically; never compile these — rewrite them)"])
+    for pattern in RISK_PATTERNS:
+        lines.append(
+            f"- {pattern.id} [{pattern.risk.value}] engages {', '.join(pattern.attributes)} "
+            f"({', '.join(pattern.statutes)}): {pattern.explanation} Rewrite: {pattern.rewrite}"
+        )
+    return "\n".join(lines)

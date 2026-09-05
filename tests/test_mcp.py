@@ -39,8 +39,9 @@ async def test_sound_rule_returns_the_compiled_test():
         await server.call_tool("check_screening_rule", {"rule_text": "At least 5 years of Python experience"})
     )
     assert result["verdict"] == "applicable"
-    assert result["test"]["field"] == "total_years_experience"
-    assert result["test"]["value"] == 5
+    assert result["test"]["dsl"].startswith("REQUIRE years_experience >= 5")
+    assert "Python" in result["test"]["dsl"]
+    assert result["test"]["clause"]["kind"] == "require"
 
 
 async def test_batch_check_counts_applied_and_flagged():

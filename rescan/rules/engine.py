@@ -2,176 +2,45 @@
 
 Two properties this module exists to guarantee:
 
-* Every outcome names the structured value it was decided on, in plain
+* Every outcome names the structured values it was decided on, in plain
   language, so an exclusion can be explained to the candidate and defended by
   the employer.
 * A value the resume never stated produces `passed=None`, not a rejection. The
   candidate goes to manual review. Silence in a document is not evidence
   against a person.
+
+The evaluation itself lives in `rescan.dsl.eval`; this module ties it to rules
+and collects the result for one candidate.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from rescan.rules.models import ClassifiedRule, Predicate, RuleOutcome, RuleSet
+from rescan.dsl.ast import fields_used
+from rescan.dsl.eval import JudgeLike, Verdict, evaluate
+from rescan.rules.models import ClassifiedRule, RuleOutcome, RuleSet
 from rescan.schemas import AnonymizedProfile
 
-# Human-readable names for the predicate fields, used in outcome reasons.
-FIELD_LABELS: dict[str, str] = {
-    "total_years_experience": "years of professional experience",
-    "highest_aqf": "highest qualification (AQF level)",
-    "skills": "skills",
-    "languages": "languages",
-    "certifications": "certifications",
-    "work_rights_unrestricted": "unrestricted work rights",
-    "work_rights_status": "work rights status",
-}
 
-LIST_FIELDS = {"skills", "languages", "certifications"}
+def evaluate_rule(
+    rule: ClassifiedRule, profile: AnonymizedProfile, judge: JudgeLike | None = None
+) -> RuleOutcome | None:
+    """Evaluate one requirement, or None if the rule is not applied as a filter.
 
-# Numeric reasons are phrased per field so they read as a sentence a candidate
-# could be shown, rather than a field name with a number appended.
-NUMERIC_PHRASING: dict[str, tuple[str, str]] = {
-    "total_years_experience": (
-        "Candidate has {observed:g} years of professional experience",
-        "{target:g} years",
-    ),
-    "highest_aqf": (
-        "Candidate's highest qualification is AQF level {observed:g}",
-        "AQF level {target:g}",
-    ),
-}
-
-
-def read_field(profile: AnonymizedProfile, field: str) -> Any:
-    if field == "total_years_experience":
-        return profile.total_years_experience
-    if field == "highest_aqf":
-        return profile.highest_aqf
-    if field == "skills":
-        return [skill.name for skill in profile.skills]
-    if field == "languages":
-        return list(profile.languages)
-    if field == "certifications":
-        return list(profile.certifications)
-    if field == "work_rights_unrestricted":
-        return profile.work_rights.unrestricted
-    if field == "work_rights_status":
-        return profile.work_rights.status.value
-    raise KeyError(f"unknown predicate field: {field!r}")
-
-
-def _matches(required: str, held: list[str]) -> bool:
-    """Loose containment so 'AWS' matches 'AWS Solutions Architect'."""
-    needle = required.strip().lower()
-    if not needle:
-        return False
-    return any(needle in item.lower() or item.lower() in needle for item in held)
-
-
-def _describe_list(values: list[str], limit: int = 6) -> str:
-    if not values:
-        return "none listed"
-    shown = ", ".join(values[:limit])
-    return shown if len(values) <= limit else f"{shown} (+{len(values) - limit} more)"
-
-
-def evaluate_predicate(predicate: Predicate, profile: AnonymizedProfile) -> tuple[bool | None, Any, str]:
-    """Return ``(passed, observed, reason)`` for one predicate."""
-    observed = read_field(profile, predicate.field)
-    label = FIELD_LABELS.get(predicate.field, predicate.field)
-
-    # Unknown is never a rejection.
-    if observed is None or (predicate.field in LIST_FIELDS and not observed):
-        return (
-            None,
-            observed,
-            f"The resume does not state {label}, so this rule could not be applied. "
-            "Sent to manual review rather than excluded.",
-        )
-
-    operator = predicate.operator
-    value = predicate.value
-
-    if operator in {"gte", "lte"}:
-        try:
-            observed_number = float(observed)
-            target = float(value)
-        except (TypeError, ValueError):
-            return None, observed, f"Could not compare {label} ({observed!r}) with {value!r}; sent to manual review."
-        if operator == "gte":
-            passed = observed_number >= target
-            comparator = "at least"
-        else:
-            passed = observed_number <= target
-            comparator = "no more than"
-        subject_template, target_template = NUMERIC_PHRASING.get(
-            predicate.field, ("Candidate's " + label + " is {observed:g}", "{target:g}")
-        )
-        subject = subject_template.format(observed=observed_number)
-        requirement = target_template.format(target=target)
-        verb = "meets" if passed else "does not meet"
-        return (
-            passed,
-            observed,
-            f"{subject}; the rule requires {comparator} {requirement}. This {verb} the requirement.",
-        )
-
-    if operator == "eq":
-        passed = observed == value
-        return passed, observed, f"{label.capitalize()} is {observed!r}; the rule requires {value!r}."
-
-    if operator == "in":
-        options = value if isinstance(value, list) else [value]
-        passed = observed in options
-        return (
-            passed,
-            observed,
-            f"{label.capitalize()} is {observed!r}; the rule accepts {', '.join(map(str, options))}.",
-        )
-
-    if operator in {"contains_all", "contains_any"}:
-        required = value if isinstance(value, list) else [value]
-        held = [str(item) for item in observed]
-        matched = [item for item in required if _matches(str(item), held)]
-        missing = [item for item in required if item not in matched]
-        passed = (not missing) if operator == "contains_all" else bool(matched)
-        if passed:
-            reason = f"Candidate's {label} include {', '.join(matched)}."
-        elif operator == "contains_all":
-            reason = (
-                f"Candidate's {label} do not include {', '.join(missing)}. "
-                f"Listed {label}: {_describe_list(held)}."
-            )
-        else:
-            reason = (
-                f"Candidate's {label} include none of {', '.join(map(str, required))}. "
-                f"Listed {label}: {_describe_list(held)}."
-            )
-        return passed, held, reason
-
-    if operator in {"is_true", "is_false"}:
-        expected = operator == "is_true"
-        passed = bool(observed) is expected
-        state = "does" if observed else "does not"
-        return passed, observed, f"Candidate {state} have {label}; the rule requires that they {'do' if expected else 'do not'}."
-
-    return None, observed, f"Unsupported operator {operator!r}; sent to manual review."
-
-
-def evaluate_rule(rule: ClassifiedRule, profile: AnonymizedProfile) -> RuleOutcome | None:
-    """Evaluate one rule, or None if the rule is not applied."""
-    if not rule.is_applied or rule.predicate is None:
+    PREFER clauses never screen anyone; they are scored by the ranking pass.
+    """
+    if not rule.is_applied or rule.clause is None or rule.clause.kind != "require":
         return None
-    passed, observed, reason = evaluate_predicate(rule.predicate, profile)
+    verdict: Verdict = evaluate(rule.clause.expr, profile, judge)
     return RuleOutcome(
         rule_id=rule.id,
         source_text=rule.source_text,
-        field=rule.predicate.field,
-        passed=passed,
-        observed=observed,
-        reason=reason,
+        dsl=rule.dsl or rule.clause.to_dsl(),
+        fields=fields_used(rule.clause.expr),
+        passed=verdict.value,
+        observed=verdict.observed,
+        reason=verdict.reason,
     )
 
 
@@ -211,10 +80,12 @@ class ScreeningResult:
         }
 
 
-def screen(profile: AnonymizedProfile, rule_set: RuleSet) -> ScreeningResult:
+def screen(
+    profile: AnonymizedProfile, rule_set: RuleSet, judge: JudgeLike | None = None
+) -> ScreeningResult:
     outcomes = [
         outcome
-        for outcome in (evaluate_rule(rule, profile) for rule in rule_set.rules)
+        for outcome in (evaluate_rule(rule, profile, judge) for rule in rule_set.rules)
         if outcome is not None
     ]
     return ScreeningResult(profile.candidate_ref, outcomes)

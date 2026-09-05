@@ -321,100 +321,163 @@ def anonymize_user_prompt(profile_json: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Pass 3 — recruiter rule classification and compilation
+# Pass 3 — compile a recruiter's plan into the rule language
 # --------------------------------------------------------------------------
 
-CLASSIFY_RULE_SCHEMA: dict[str, Any] = {
+from rescan.dsl.fields import reference_text as _dsl_reference  # noqa: E402
+from rescan.rules.statutes import legal_brief as _legal_brief  # noqa: E402
+
+COMPILE_DSL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["risk", "protected_attributes", "explanation", "suggested_rewrite", "predicate"],
+    # `reasoning` comes first so the model thinks before it writes rules.
+    "required": ["reasoning", "rules"],
     "properties": {
-        "risk": {
+        "reasoning": {
             "type": "string",
-            "enum": ["none", "review", "high"],
             "description": (
-                "'high' if the rule selects on a protected attribute or a proxy for one; "
-                "'review' if lawful only with a documented job-based justification; "
-                "'none' if it tests capability directly."
+                "Reason step by step before writing any rule: (1) what capability the role "
+                "genuinely needs; (2) each requirement in the plan, whether it tests capability "
+                "or a protected attribute or a proxy for one, naming the statute engaged; "
+                "(3) how each proxy was rewritten as a measurable capability; (4) which "
+                "requirements are hard (REQUIRE) and which are preferences (PREFER) with weights."
             ),
         },
-        "protected_attributes": {
+        "rules": {
             "type": "array",
-            "items": {"type": "string"},
-            "description": "Protected attributes the rule engages, e.g. 'age', 'national or ethnic origin'.",
-        },
-        "explanation": _str_or_null(
-            "Why this is or is not a risk, in plain language a recruiter can act on."
-        ),
-        "suggested_rewrite": _str_or_null(
-            "A measurable replacement testing the underlying job requirement. Null if the rule is already sound."
-        ),
-        "predicate": {
-            "type": ["object", "null"],
-            "additionalProperties": False,
-            "required": ["field", "operator", "value", "description"],
-            "description": "How to test the rule against a candidate, or null if it cannot be mechanised.",
-            "properties": {
-                "field": {
-                    "type": "string",
-                    "enum": [
-                        "total_years_experience",
-                        "highest_aqf",
-                        "skills",
-                        "languages",
-                        "certifications",
-                        "work_rights_unrestricted",
-                        "work_rights_status",
-                    ],
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "source_text", "source_index", "kind", "dsl", "justification",
+                    "risk", "protected_attributes", "explanation", "suggested_rewrite", "legal_basis",
+                ],
+                "properties": {
+                    "source_text": {
+                        "type": "string",
+                        "description": "The sentence or phrase of the plan this rule comes from, verbatim.",
+                    },
+                    "source_index": {
+                        "type": ["integer", "null"],
+                        "description": "When the plan was given as numbered rules, the 1-based number this rule answers. Otherwise null.",
+                    },
+                    "kind": {"type": "string", "enum": ["require", "prefer"]},
+                    "dsl": _str_or_null(
+                        "One clause in the rule language, starting with REQUIRE or PREFER. Null when the "
+                        "requirement is high risk or cannot be expressed in the language."
+                    ),
+                    "justification": _str_or_null("The job-based reason this requirement exists, in one sentence."),
+                    "risk": {
+                        "type": "string",
+                        "enum": ["none", "review", "high"],
+                        "description": (
+                            "'high' if the requirement selects on a protected attribute or a proxy for one; "
+                            "'review' if lawful only with a documented job-based justification; "
+                            "'none' if it tests capability directly."
+                        ),
+                    },
+                    "protected_attributes": {"type": "array", "items": {"type": "string"}},
+                    "explanation": _str_or_null("Why this is or is not a risk, in plain language a recruiter can act on."),
+                    "suggested_rewrite": _str_or_null(
+                        "A measurable replacement testing the underlying job requirement. Null if the rule is already sound."
+                    ),
+                    "legal_basis": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Statute codes engaged, e.g. RDA_1975, ADA_2004. Empty when risk is none.",
+                    },
                 },
-                "operator": {
-                    "type": "string",
-                    "enum": ["gte", "lte", "eq", "contains_all", "contains_any", "in", "is_true", "is_false"],
-                },
-                "value": {
-                    "type": ["number", "string", "boolean", "array", "null"],
-                    "items": {"type": "string"},
-                },
-                "description": {"type": "string"},
             },
         },
     },
 }
 
-CLASSIFY_RULE_SYSTEM = """You review a recruiter's screening rule under Australian
-anti-discrimination law, and where the rule is sound you compile it into a test.
 
-Protected attributes include race, colour, national or ethnic origin, sex,
-sexual orientation, gender identity, age, disability, marital or relationship
-status, pregnancy, family or carer's responsibilities, religion, political
-opinion and social origin.
+def compile_dsl_system() -> str:
+    return f"""You turn a recruiter's hiring plan into screening rules written in a small
+query language, under Australian anti-discrimination law. You reason first,
+then write rules. The rules run against anonymized candidate profiles: no
+name, institution, suburb, employer name, or graduation year exists in them.
 
-Judge two things:
+Work in this order and write your reasoning down:
 
-1. Risk. A rule is high risk when it selects on a protected attribute or on a
-   proxy for one — a neutral-sounding criterion a protected group is less able
-   to meet and which is not reasonable for the job. It is 'review' when it may
-   be lawful with a documented job-based justification, such as a citizenship
-   requirement for a role needing a security clearance. It is 'none' when it
-   tests a capability the job actually needs.
+1. What does the role genuinely need? Separate capability (skills, depth of
+   experience, qualification level, licences, work rights) from everything
+   else.
+2. Take each requirement in the plan. Does it test capability, or a
+   protected attribute or a proxy for one? A proxy is a neutral-sounding
+   criterion a protected group is less able to meet and which is not
+   reasonable for the job. Name the statute engaged. 'Native English
+   speaker', 'recent graduate', 'cultural fit', 'Australian degree',
+   'leading company' and 'no career gaps' are proxies.
+3. For each proxy, say what the recruiter most likely needs and express
+   that measurably. Never suggest a rewrite that is the same proxy reworded.
+   Write the rule for the rewrite, not for the proxy, and mark the original
+   text with its risk so the recruiter sees why.
+4. Decide which requirements are hard (REQUIRE — a candidate who fails is
+   excluded, with the reason shown to them) and which are preferences
+   (PREFER — they order candidates, with WEIGHT for importance). When the
+   plan says 'must', 'required', 'essential' use REQUIRE; 'nice to have',
+   'preferred', 'desirable', 'ideally', 'bonus' use PREFER. If unsure, PREFER.
 
-2. The underlying requirement. When you flag a rule, say what the recruiter
-   most likely needs and express it measurably. Replace 'recent graduate' with a
-   band of years of experience; replace 'native English speaker' with a standard
-   of communication. Never suggest a rewrite that is the same proxy reworded.
+Rules for writing the language:
+- Only the fields, records and operators in the reference below exist. A
+  forbidden identifier is rejected by the parser.
+- Absence is unknown, never failure: a candidate whose resume is silent goes
+  to manual review. Do not write rules that depend on silence.
+- Use ANY <record> WHERE ... for per-skill years, role titles, fields of
+  study; use COUNT/SUM/MAX for how many or how long.
+- Use ASK "..." only for a specific, job-related, yes/no question that no
+  structured field can answer (e.g. "Has the candidate led an incident
+  response?"). Never ask about a protected attribute or a proxy.
+- Qualification requirements use AQF levels: diploma 5, advanced diploma 6,
+  bachelor 7, honours or graduate certificate/diploma 8, masters 9, doctorate
+  10. Overseas awards are mapped to their equivalent before rules run.
+- Work-rights requirements are lawful: `work_rights IS unrestricted`. Require
+  citizenship only where a security clearance genuinely requires it, and mark
+  it 'review'.
+- One rule per requirement. Quote the plan text the rule comes from.
 
-Compile a predicate only when the rule tests capability. Never compile a rule
-you rated high risk. Requirements about work rights are lawful and should be
-compiled. Qualification requirements compile to an AQF level: a bachelor degree
-is 7, honours or a graduate certificate or diploma is 8, a masters is 9, a
-doctorate is 10, a diploma is 5.
+{_legal_brief()}
+
+LANGUAGE REFERENCE
+{_dsl_reference()}
 
 Return JSON only."""
 
 
-def classify_rule_user_prompt(rule_text: str, role_context: str | None = None) -> str:
+def compile_dsl_user_prompt(plan_text: str, role_context: str | None = None) -> str:
     context = f"\n\nRole context: {role_context}" if role_context else ""
-    return f"Review this screening rule.\n\n<rule>\n{rule_text}\n</rule>{context}"
+    return f"Compile this hiring plan into screening rules.\n\n<plan>\n{plan_text}\n</plan>{context}"
+
+
+COMPILE_DSL_REPAIR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["dsl"],
+    "properties": {
+        "dsl": _str_or_null("The corrected clause, or null if the requirement cannot be expressed in the language."),
+    },
+}
+
+
+def compile_dsl_repair_system() -> str:
+    return f"""You fix a screening rule that did not parse in the rule language. Return the
+corrected clause, or null if it cannot be expressed. Never work around a
+forbidden identifier by renaming it: the field is forbidden because it is a
+proxy for a protected attribute.
+
+LANGUAGE REFERENCE
+{_dsl_reference()}
+
+Return JSON only."""
+
+
+def compile_dsl_repair_user_prompt(source_text: str, dsl: str, errors: list[str]) -> str:
+    error_text = "\n".join(f"- {error}" for error in errors)
+    return (
+        f"Requirement: {source_text}\n\nRejected clause:\n{dsl}\n\nParser errors:\n{error_text}"
+    )
 
 
 # --------------------------------------------------------------------------

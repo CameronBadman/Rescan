@@ -712,29 +712,70 @@ def _first_group(match: re.Match[str]) -> int:
     return int(next(group for group in match.groups() if group))
 
 
-def compile_predicate(rule_text: str) -> dict[str, Any] | None:
-    """Map a recruiter rule onto the closed predicate vocabulary, or None."""
-    text = rule_text.strip()
+PREFER_RE = re.compile(
+    r"\b(prefer(?:red|able)?|desirable|nice[- ]to[- ]have|bonus|ideally|advantage(?:ous)?|a plus|would be great)\b",
+    re.IGNORECASE,
+)
+ASK_RE = re.compile(
+    r"\b(?:should|must|ideally|has|have|who has|who have)\s+(?:have\s+)?"
+    r"(led|built|shipped|delivered|managed|owned|run|designed|launched|mentored|presented|published|migrated|scaled|operated)\b(.*)",
+    re.IGNORECASE,
+)
+TECH_TOKENS = (
+    "python", "sql", "java", "javascript", "typescript", "go", "golang", "rust", "c#", "c++", "scala", "kotlin",
+    "aws", "gcp", "azure", "kubernetes", "docker", "terraform", "kafka", "spark", "flink", "airflow", "dbt",
+    "snowflake", "postgres", "postgresql", "mysql", "redis", "react", "angular", "vue", "node", "django",
+    "flask", "fastapi", "spring", "tensorflow", "pytorch", "linux", "git", "jenkins", "ansible", "figma",
+)
+_TECH_RE = re.compile(r"(?<![\w#+])(" + "|".join(re.escape(t) for t in TECH_TOKENS) + r")(?![\w#+])", re.IGNORECASE)
+
+
+def _dsl_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _dsl_list(values: list[str]) -> str:
+    return "(" + ", ".join(_dsl_quote(v) for v in values) + ")"
+
+
+def _skill_groups(text: str) -> tuple[list[str], list[list[str]]]:
+    """Split a sentence into skills that are all required and OR-groups."""
+    required: list[str] = []
+    any_groups: list[list[str]] = []
+    for chunk in re.split(r",|\bplus\b|\band also\b|;", text, flags=re.IGNORECASE):
+        found = []
+        for match in _TECH_RE.finditer(chunk):
+            token = match.group(1)
+            canonical = next(t for t in TECH_TOKENS if t.lower() == token.lower())
+            display = canonical.upper() if canonical in {"sql", "aws", "gcp"} else canonical.capitalize() if canonical.islower() else canonical
+            if display not in found:
+                found.append(display)
+        if not found:
+            continue
+        if re.search(r"\bor\b", chunk, re.IGNORECASE) and len(found) > 1:
+            any_groups.append(found)
+        else:
+            required.extend(f for f in found if f not in required)
+    return required, any_groups
+
+
+def compile_sentence(sentence: str) -> dict[str, Any] | None:
+    """Map one plan sentence onto the rule language, or None.
+
+    Every recognised requirement in the sentence is ANDed, so "5+ years with
+    Python and SQL, plus AWS or GCP" becomes one clause with three parts.
+    """
+    text = sentence.strip()
+    if not text:
+        return None
+    parts: list[str] = []
 
     match = YEARS_MIN_RE.search(text)
     if match:
-        years = _first_group(match)
-        return {
-            "field": "total_years_experience",
-            "operator": "gte",
-            "value": years,
-            "description": f"At least {years} years of professional experience.",
-        }
-
+        parts.append(f"years_experience >= {_first_group(match)}")
     match = YEARS_MAX_RE.search(text)
     if match:
-        years = int(match.group(1))
-        return {
-            "field": "total_years_experience",
-            "operator": "lte",
-            "value": years,
-            "description": f"No more than {years} years of professional experience.",
-        }
+        parts.append(f"years_experience <= {int(match.group(1))}")
 
     match = DEGREE_RE.search(text)
     if match:
@@ -747,70 +788,88 @@ def compile_predicate(rule_text: str) -> dict[str, Any] | None:
         if level is None and token.startswith("certificate"):
             level = 4
         if level is not None:
-            return {
-                "field": "highest_aqf",
-                "operator": "gte",
-                "value": level,
-                "description": f"Qualification at AQF level {level} or above (or assessed equivalent).",
-            }
+            parts.append(f"aqf >= {level}")
 
     if CITIZEN_ONLY_RE.search(text):
-        return {
-            "field": "work_rights_status",
-            "operator": "in",
-            "value": ["citizen"],
-            "description": "Australian citizenship.",
-        }
-
-    if WORK_RIGHTS_RE.search(text):
-        return {
-            "field": "work_rights_unrestricted",
-            "operator": "is_true",
-            "value": True,
-            "description": "Holds unrestricted Australian work rights.",
-        }
-
-    match = SKILL_LEAD_RE.search(text)
-    if match:
-        skills = _split_skills(text[match.end():])
-        if skills:
-            operator = "contains_any" if re.search(r"\bor\b", text, re.IGNORECASE) else "contains_all"
-            joiner = " or " if operator == "contains_any" else " and "
-            return {
-                "field": "skills",
-                "operator": operator,
-                "value": skills,
-                "description": f"Demonstrated skill in {joiner.join(skills)}.",
-            }
+        parts.append('work_rights IS citizen')
+    elif WORK_RIGHTS_RE.search(text):
+        parts.append("work_rights IS unrestricted")
 
     if CERT_RE.search(text):
-        skills = _split_skills(CERT_RE.split(text)[-1])
-        if skills:
-            return {
-                "field": "certifications",
-                "operator": "contains_any",
-                "value": skills,
-                "description": f"Holds one of: {', '.join(skills)}.",
-            }
+        certs = _split_skills(CERT_RE.split(text)[-1])
+        if certs:
+            parts.append(f"certifications HAS ANY {_dsl_list(certs)}")
+    else:
+        required, any_groups = _skill_groups(text)
+        if not required and not any_groups:
+            lead = SKILL_LEAD_RE.search(text)
+            if lead:
+                skills = _split_skills(text[lead.end():])
+                if skills:
+                    if re.search(r"\bor\b", text, re.IGNORECASE):
+                        any_groups.append(skills)
+                    else:
+                        required = skills
+        if required:
+            parts.append(f"skills HAS ALL {_dsl_list(required)}" if len(required) > 1 else f"skills HAS ANY {_dsl_list(required)}")
+        for group in any_groups:
+            parts.append(f"skills HAS ANY {_dsl_list(group)}")
 
-    return None
+    if not parts:
+        ask = ASK_RE.search(text)
+        if ask:
+            verb, rest = ask.group(1).lower(), ask.group(2).strip(" .")
+            if rest:
+                parts.append(f'ASK {_dsl_quote(f"Has the candidate {verb} {rest}?")}')
+
+    if not parts:
+        return None
+    kind = "prefer" if PREFER_RE.search(text) else "require"
+    return {"kind": kind, "expr": " AND ".join(parts)}
 
 
-def handle_classify_rule(request: LLMRequest) -> dict[str, Any]:
-    """Compile the rule. Legal risk is decided by the deterministic pattern
-    table in rescan.rules.classifier, which this backend does not second-guess."""
-    rule_text = request.context.get("rule_text", "")
-    if not rule_text.strip():
-        raise LLMError("classify_rule: empty rule text")
+def handle_compile_dsl(request: LLMRequest) -> dict[str, Any]:
+    """Compile a plan by pattern. Legal risk is decided by the deterministic
+    statute table in rescan.rules.classifier, which this backend does not
+    second-guess, so every rule here reports risk 'none'."""
+    from rescan.rules.classifier import split_plan  # local: avoids an import cycle at module load
+
+    plan = request.context.get("plan") or ""
+    rule_texts = request.context.get("rule_texts") or []
+    if not plan.strip() and not rule_texts:
+        raise LLMError("compile_dsl: empty plan")
+
+    sources: list[tuple[int | None, str]] = [(index, text) for index, text in enumerate(rule_texts, start=1)]
+    sources += [(None, sentence) for sentence in split_plan(plan)]
+
+    rules = []
+    for index, sentence in sources:
+        compiled = compile_sentence(sentence)
+        kind = compiled["kind"] if compiled else ("prefer" if PREFER_RE.search(sentence) else "require")
+        rules.append({
+            "source_text": sentence,
+            "source_index": index,
+            "kind": kind,
+            "dsl": f"{kind.upper()} {compiled['expr']}" if compiled else None,
+            "justification": None,
+            "risk": "none",
+            "protected_attributes": [],
+            "explanation": None,
+            "suggested_rewrite": None,
+            "legal_basis": [],
+        })
     return {
-        "risk": "none",
-        "protected_attributes": [],
-        "explanation": None,
-        "suggested_rewrite": None,
-        "predicate": compile_predicate(rule_text),
+        "reasoning": (
+            "Deterministic backend: each sentence of the plan was mapped onto the rule "
+            "language by pattern. Legal risk is decided by the statute table, not here."
+        ),
+        "rules": rules,
     }
 
 
+def handle_compile_dsl_repair(request: LLMRequest) -> dict[str, Any]:
+    """The stub never emits a clause it cannot parse, so there is nothing to repair."""
+    return {"dsl": None}
 
 
 # --------------------------------------------------------------------------
@@ -924,7 +983,8 @@ def handle_rank(request: LLMRequest) -> dict[str, Any]:
 HANDLERS: dict[str, Callable[[LLMRequest], dict[str, Any]]] = {
     "structure": handle_structure,
     "anonymize": handle_anonymize,
-    "classify_rule": handle_classify_rule,
+    "compile_dsl": handle_compile_dsl,
+    "compile_dsl_repair": handle_compile_dsl_repair,
     "rank": handle_rank,
 }
 

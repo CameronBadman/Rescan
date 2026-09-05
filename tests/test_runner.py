@@ -146,7 +146,7 @@ def test_job_failure_is_recorded_rather_than_swallowed(runner, documents, monkey
     def boom(*args, **kwargs):
         raise RuntimeError("inference cluster down")
 
-    monkeypatch.setattr("rescan.pipeline.runner.classify_rules", boom)
+    monkeypatch.setattr("rescan.pipeline.runner.compile_plan", boom)
     with pytest.raises(RuntimeError):
         pipeline.run_job(job_id, RULES)
     job = store.get_job(job_id)
