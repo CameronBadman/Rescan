@@ -278,7 +278,10 @@ export RESCAN_S3_PREFIX=jobs
 ```
 
 `RESCAN_OBJECT_STORE=local` (the default) reads the same layout from
-`data/bucket/`, the way the stub stands in for inference.
+`data/bucket/`, the way the stub stands in for inference. `infra/aws/` is the
+Terraform for the real bucket — private, encrypted, versioned, TLS-only,
+90-day expiry on job documents, in Sydney — and a service user that can read
+`jobs/*` and nothing else; its output prints these variables.
 
 ## MCP server
 
@@ -354,8 +357,12 @@ Not yet verified:
   27B writes the rule language — and how often the repair round fires — is
   unmeasured. The bias audit has no real result yet. Run
   `python -m scripts.smoke_real_model` against the served 27B first.
-- **No live S3 endpoint.** The boto3 path is exercised against moto only; the
-  local directory store is what ran end to end.
+- **Bucket ingestion verified live**: `infra/aws` created the bucket and a
+  read-only service user, and `POST /jobs/from-bucket` pulled 12 documents
+  from `s3://rescan-resumes-…/jobs/demo/` in ap-southeast-2 with that user's
+  keys and ran the job to completion. The user's scope was checked from its
+  own keys: it can list `jobs/`, and is denied the bucket root, writes, and
+  other buckets.
 - **The Docker build and compose stack are unbuilt** — Docker was not available.
 - **OCR is untested end to end**; neither Tesseract nor poppler was installed, so
   the fallback was only verified to degrade correctly (warning recorded, document
