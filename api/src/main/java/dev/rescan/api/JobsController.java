@@ -41,6 +41,7 @@ public class JobsController {
     if (!status.isEmpty()
         && !Set.of(
                 "UPLOADING",
+                "VERIFYING",
                 "QUEUED",
                 "PROCESSING",
                 "SUCCEEDED",

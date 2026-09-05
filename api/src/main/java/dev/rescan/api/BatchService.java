@@ -145,62 +145,14 @@ public class BatchService {
   }
 
   public Map<String, Object> submit(UUID user, UUID job) {
-    var current = store.owned(user, job);
-    if ("DELETING".equals(current.get("status"))) throw new Errors.Conflict("Job is being deleted");
-    if (!"UPLOADING".equals(current.get("status")))
-      return Map.of("jobId", job, "status", current.get("status"));
-    var docs =
-        store.jdbc.queryForList(
-            "SELECT id,source_key,size_bytes FROM documents WHERE job_id=?", job);
-    var versions = new ConcurrentHashMap<UUID, String>();
-    var invalid = new ConcurrentLinkedQueue<UUID>();
-    try (var pool = Executors.newFixedThreadPool(16)) {
-      var futures =
-          docs.stream()
-              .map(
-                  doc ->
-                      pool.submit(
-                          () -> {
-                            try {
-                              var head = blobs.head((String) doc.get("source_key"));
-                              if (head.contentLength()
-                                      != ((Number) doc.get("size_bytes")).longValue()
-                                  || head.versionId() == null
-                                  || "null".equals(head.versionId()))
-                                invalid.add((UUID) doc.get("id"));
-                              else versions.put((UUID) doc.get("id"), head.versionId());
-                            } catch (S3Exception e) {
-                              if (e.statusCode() == 404) invalid.add((UUID) doc.get("id"));
-                              else throw e;
-                            }
-                          }))
-              .toList();
-      for (var future : futures) future.get();
-    } catch (Exception e) {
-      throw new IllegalStateException("Upload verification unavailable", e);
-    }
-    if (!invalid.isEmpty()) throw new Errors.Conflict("Missing or invalid uploads: " + invalid);
-    store.tx.executeWithoutResult(
-        status -> {
-          String state =
-              store.jdbc.queryForObject(
-                  "SELECT status FROM jobs WHERE id=? AND user_id=?",
-                  String.class,
-                  job,
-                  user);
-          if ("DELETING".equals(state)) throw new Errors.Conflict("Job is being deleted");
-          if (!"UPLOADING".equals(state)) return;
-          versions.forEach(
-              (id, version) ->
-                  store.jdbc.update(
-                      "UPDATE documents SET source_version=?,status='QUEUED',updated_at=unixepoch() WHERE"
-                          + " id=?",
-                      version,
-                      id));
-          store.jdbc.update(
-              "INSERT INTO outbox(document_id) SELECT id FROM documents WHERE job_id=?", job);
-          store.jdbc.update("UPDATE jobs SET status='QUEUED',updated_at=unixepoch() WHERE id=?", job);
-        });
-    return Map.of("jobId", job, "status", "QUEUED");
+    return store.tx.execute(tx -> {
+      var current=store.owned(user,job);
+      if ("DELETING".equals(current.get("status"))) throw new Errors.Conflict("Job is being deleted");
+      if ("UPLOADING".equals(current.get("status"))) {
+        store.jdbc.update("UPDATE jobs SET status='VERIFYING',verification_generation=verification_generation+1,verification_token=NULL,verification_until=NULL,updated_at=unixepoch() WHERE id=?",job);
+        return Map.of("jobId",job,"status","VERIFYING");
+      }
+      return Map.of("jobId",job,"status",current.get("status"));
+    });
   }
 }
