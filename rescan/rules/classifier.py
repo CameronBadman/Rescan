@@ -270,6 +270,8 @@ def compile_plan(
         user=compile_dsl_user_prompt(plan_text, role_context),
         schema=COMPILE_DSL_SCHEMA,
         model=model,
+        # Reasoning plus one clause per requirement; a long plan needs room.
+        max_tokens=8192,
         context={"plan": plan, "rule_texts": texts, "role_context": role_context},
     )
 

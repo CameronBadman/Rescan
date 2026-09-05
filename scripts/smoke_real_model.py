@@ -9,7 +9,8 @@ latency and token counts, and finally runs one whole job end to end.
     RESCAN_LLM_BACKEND=openai RESCAN_LLM_BASE_URL=http://gpu-host:8000/v1 \\
         python -m scripts.smoke_real_model [--sample data/samples/001_priya_nair.txt] [--skip-job]
 
-Exit status is non-zero if any pass fails, so it can gate a deployment.
+Exit status is non-zero if any pass fails, so it can gate a deployment (do
+not pipe the output through grep or the pipe's status wins).
 """
 
 from __future__ import annotations
@@ -177,9 +178,16 @@ def main(argv: list[str] | None = None) -> int:
                 events = {}
                 for entry in store.audit_trail(job_id):
                     events[entry["event"]] = events.get(entry["event"], 0) + 1
-                report.ok("job", f"{seconds:.1f}s  docs={len(samples)} counts={ {k: v for k, v in counts.items() if v} } "
-                                 f"shortlisted={len(shortlist['entries'])} excluded={len(shortlist['excluded'])} "
-                                 f"manual={len(shortlist['manual_review'])}\n       events={events}")
+                detail = (f"{seconds:.1f}s  docs={len(samples)} counts={ {k: v for k, v in counts.items() if v} } "
+                          f"shortlisted={len(shortlist['entries'])} excluded={len(shortlist['excluded'])} "
+                          f"manual={len(shortlist['manual_review'])}\n       events={events}")
+                dead = [entry for entry in store.audit_trail(job_id) if entry["event"] in ("dead_lettered", "failed")]
+                for entry in dead[:4]:
+                    detail += f"\n       {entry['event']} at {entry['stage']}: {entry['detail'].get('reason', '')[:160]}"
+                if counts.get("complete", 0) == 0:
+                    report.fail("job", detail + "\n       (no document made it through the pipeline)")
+                else:
+                    report.ok("job", detail)
             except Exception as exc:  # a failed job is the finding
                 report.fail("job", f"{type(exc).__name__}: {exc}"[:300])
             finally:

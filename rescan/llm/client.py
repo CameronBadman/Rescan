@@ -259,11 +259,18 @@ class OpenAICompatClient:
                     raise LLMError(f"inference server returned {resp.status_code}: {resp.text[:300]}")
 
                 body = resp.json()
-                message = body["choices"][0]["message"]
+                choice = body["choices"][0]
+                message = choice["message"]
                 content = message.get("content") or ""
                 if not content.strip() and message.get("reasoning_content"):
                     # A thinking model that spent its whole budget reasoning.
                     raise LLMError("model returned reasoning but no answer; raise max_tokens or disable thinking")
+                if choice.get("finish_reason") == "length":
+                    # Truncated JSON is unrecoverable; say so rather than "could not parse".
+                    raise LLMError(
+                        f"task {request.task}: response truncated at max_tokens={request.max_tokens}; "
+                        "raise the budget or shorten the input"
+                    )
                 if self._schema_mode != mode or self._send_extras != with_extras:
                     log.info("inference server %s: structured output via %s, extras %s",
                              self.base_url, mode, "accepted" if with_extras else "rejected")

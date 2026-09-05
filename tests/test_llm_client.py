@@ -199,3 +199,20 @@ def test_every_style_is_a_distinct_request_shape():
 
 def test_served_models_lists_the_server_catalogue():
     assert FakeServer(lambda p: (200, {})).client().served_models() == ["fake"]
+
+
+def test_truncated_response_is_a_clear_error():
+    body = completion('{"answer": "x", "long": "aaaa')
+    body["choices"][0]["finish_reason"] = "length"
+    server = FakeServer(lambda p: (200, body))
+    with pytest.raises(LLMError, match="truncated at max_tokens"):
+        server.client().json_call(request(max_tokens=64))
+
+
+def test_nullable_enums_use_the_anyof_form():
+    from rescan.llm.prompts import STRUCTURE_SCHEMA
+
+    skill = STRUCTURE_SCHEMA["properties"]["skills"]["items"]["properties"]
+    assert "anyOf" in skill["proficiency"] and None not in skill["proficiency"]["anyOf"][0]["enum"]
+    role = STRUCTURE_SCHEMA["properties"]["experience"]["items"]["properties"]
+    assert "anyOf" in role["seniority"] and "anyOf" in role["employment_type"]

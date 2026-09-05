@@ -15,6 +15,15 @@ def _str_or_null(description: str) -> dict[str, Any]:
     return {"type": ["string", "null"], "description": description}
 
 
+def _nullable_enum(values: list[str], description: str) -> dict[str, Any]:
+    """A closed vocabulary or null, in the anyOf form every guided decoder
+    (xgrammar, outlines, llama.cpp's grammar converter) handles reliably."""
+    return {
+        "anyOf": [{"type": "string", "enum": values}, {"type": "null"}],
+        "description": description,
+    }
+
+
 # --------------------------------------------------------------------------
 # Pass 1 — structuring
 # --------------------------------------------------------------------------
@@ -72,11 +81,10 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
                         "enum": ["technical", "domain", "language", "tool", "soft", "other"],
                     },
                     "years": {"type": ["number", "null"]},
-                    "proficiency": {
-                        "type": ["string", "null"],
-                        "enum": ["beginner", "intermediate", "advanced", "expert", None],
-                        "description": "Only when the resume states a level.",
-                    },
+                    "proficiency": _nullable_enum(
+                        ["beginner", "intermediate", "advanced", "expert"],
+                        "Only when the resume states a level.",
+                    ),
                     "evidence": _str_or_null("Where in the resume this skill was demonstrated."),
                 },
             },
@@ -98,19 +106,16 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
                     "is_current": {"type": "boolean"},
                     "months": {"type": ["number", "null"], "description": "Duration in months."},
                     "summary": _str_or_null("One line on what the person did."),
-                    "seniority": {
-                        "type": ["string", "null"],
-                        "enum": [
-                            "intern", "graduate", "junior", "mid", "senior", "lead", "principal",
-                            "manager", "head", "director", "executive", None,
-                        ],
-                        "description": "Level implied by the title only; null if unclear.",
-                    },
+                    "seniority": _nullable_enum(
+                        ["intern", "graduate", "junior", "mid", "senior", "lead", "principal",
+                         "manager", "head", "director", "executive"],
+                        "Level implied by the title only; null if unclear.",
+                    ),
                     "industry": _str_or_null("Sector of the employer, e.g. 'banking', 'health', 'SaaS'."),
-                    "employment_type": {
-                        "type": ["string", "null"],
-                        "enum": ["permanent", "contract", "casual", "internship", "freelance", "volunteer", "other", None],
-                    },
+                    "employment_type": _nullable_enum(
+                        ["permanent", "contract", "casual", "internship", "freelance", "volunteer", "other"],
+                        "Null if the resume does not say.",
+                    ),
                     "team_size": {
                         "type": ["integer", "null"],
                         "description": "People managed or led in this role, only when stated.",
@@ -370,12 +375,13 @@ COMPILE_DSL_SCHEMA: dict[str, Any] = {
         "reasoning": {
             "type": "string",
             "description": (
-                "Reason step by step before writing any rule: (1) what capability the role "
-                "genuinely needs; (2) each requirement in the plan, whether it tests capability "
-                "or a protected attribute or a proxy for one, naming the statute engaged; "
-                "(3) how each proxy was rewritten as a measurable capability; (4) which "
-                "requirements are hard (REQUIRE) and which are preferences (PREFER) with weights."
+                "Reason step by step before writing any rule, in at most 250 words: (1) what "
+                "capability the role genuinely needs; (2) each requirement in the plan, whether "
+                "it tests capability or a protected attribute or a proxy for one, naming the "
+                "statute engaged; (3) how each proxy was rewritten as a measurable capability; "
+                "(4) which requirements are hard (REQUIRE) and which are preferences (PREFER)."
             ),
+            "maxLength": 2000,
         },
         "rules": {
             "type": "array",
