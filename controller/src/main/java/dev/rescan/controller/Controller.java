@@ -18,13 +18,10 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
 
   @Override
   public Map<String, Object> handleRequest(Map<String, Object> event, Context ignored) {
-    // Use a session advisory lock, not one giant transaction that blocks workers.
-    try (var connection = context.getBean(javax.sql.DataSource.class).getConnection();
-        var statement = connection.createStatement()) {
-      try (var locked = statement.executeQuery("SELECT pg_try_advisory_lock(728391)")) {
-        locked.next();
-        if (!locked.getBoolean(1)) return Map.of("skipped", true);
-      }
+    UUID lock = UUID.randomUUID();
+    try {
+      if(store.jdbc.update("UPDATE controller_state SET lock_token=?,lock_until=unixepoch()+90 WHERE id=1 AND (lock_until IS NULL OR lock_until<unixepoch())",lock)!=1)
+        return Map.of("skipped",true);
       try {
         try (var queue = new Queue()) {
           var work = new WorkStore(store);
@@ -41,12 +38,12 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
             store.jdbc.update("UPDATE controller_state SET empty_since=NULL WHERE id=1");
           else
             store.jdbc.update(
-                "UPDATE controller_state SET empty_since=COALESCE(empty_since,now()) WHERE id=1");
+                "UPDATE controller_state SET empty_since=COALESCE(empty_since,unixepoch()) WHERE id=1");
           Timestamp since =
               store.jdbc.queryForObject(
                   "SELECT empty_since FROM controller_state WHERE id=1", Timestamp.class);
           long emptySeconds =
-              since == null ? 0 : Duration.between(since.toInstant(), Instant.now()).getSeconds();
+              since == null ? 0 : Duration.between(since.toInstant(), Instant.unixepoch()).getSeconds();
           int desired = desired(outstanding, emptySeconds);
           if (desired >= 0 && !Settings.get("ECS_CLUSTER", "").isBlank()) {
             try (var ecs = EcsClient.create()) {
@@ -65,7 +62,7 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
           return Map.of("outstanding", outstanding, "desired", desired);
         }
       } finally {
-        statement.execute("SELECT pg_advisory_unlock(728391)");
+        store.jdbc.update("UPDATE controller_state SET lock_token=NULL,lock_until=NULL WHERE id=1 AND lock_token=?",lock);
       }
     } catch (Exception e) {
       throw new IllegalStateException("Controller failed; capacity preserved", e);
@@ -81,8 +78,8 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
 
   private void cleanup() {
     store.jdbc.update(
-        "UPDATE jobs SET status='DELETING',updated_at=now() WHERE status='UPLOADING' AND"
-            + " created_at<now()-interval '24 hours'");
+        "UPDATE jobs SET status='DELETING',updated_at=unixepoch() WHERE status='UPLOADING' AND"
+            + " created_at<unixepoch()-86400");
     var jobs =
         store.jdbc.queryForList(
             "SELECT id,updated_at FROM jobs WHERE status='DELETING' ORDER BY updated_at LIMIT 20");
@@ -92,7 +89,7 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
       // A final sweep after upload URL expiry also removes late uploads.
       if (((Timestamp) job.get("updated_at"))
           .toInstant()
-          .isBefore(Instant.now().minusSeconds(1200)))
+          .isBefore(Instant.unixepoch().minusSeconds(1200)))
         store.jdbc.update("DELETE FROM jobs WHERE id=? AND status='DELETING'", id);
     }
   }
@@ -100,7 +97,7 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
   public static void main(String[] args) throws Exception {
     var controller = new Controller();
     if (args.length > 0 && args[0].equals("--migrate")) {
-      Infrastructure.migrate(controller.context.getBean(javax.sql.DataSource.class));
+      Infrastructure.migrate(controller.context.getBean(TursoDb.class));
       return;
     }
     do {

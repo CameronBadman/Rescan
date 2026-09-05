@@ -61,7 +61,7 @@ public class BatchService {
             status -> {
               // Serialize create requests for this owner, including requests with the same key.
               store.jdbc.queryForObject(
-                  "SELECT id FROM users WHERE id=? FOR UPDATE", UUID.class, user);
+                  "SELECT id FROM users WHERE id=?", UUID.class, user);
               var existing =
                   store.jdbc.queryForList(
                       "SELECT id,manifest_hash FROM jobs WHERE user_id=? AND idempotency_key=?",
@@ -184,7 +184,7 @@ public class BatchService {
         status -> {
           String state =
               store.jdbc.queryForObject(
-                  "SELECT status FROM jobs WHERE id=? AND user_id=? FOR UPDATE",
+                  "SELECT status FROM jobs WHERE id=? AND user_id=?",
                   String.class,
                   job,
                   user);
@@ -193,13 +193,13 @@ public class BatchService {
           versions.forEach(
               (id, version) ->
                   store.jdbc.update(
-                      "UPDATE documents SET source_version=?,status='QUEUED',updated_at=now() WHERE"
+                      "UPDATE documents SET source_version=?,status='QUEUED',updated_at=unixepoch() WHERE"
                           + " id=?",
                       version,
                       id));
           store.jdbc.update(
               "INSERT INTO outbox(document_id) SELECT id FROM documents WHERE job_id=?", job);
-          store.jdbc.update("UPDATE jobs SET status='QUEUED',updated_at=now() WHERE id=?", job);
+          store.jdbc.update("UPDATE jobs SET status='QUEUED',updated_at=unixepoch() WHERE id=?", job);
         });
     return Map.of("jobId", job, "status", "QUEUED");
   }

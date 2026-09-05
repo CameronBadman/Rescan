@@ -1,16 +1,14 @@
 package dev.rescan.common;
 
 import java.util.*;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.support.TransactionTemplate;
 
 public class JobStore {
-  public final JdbcTemplate jdbc;
-  public final TransactionTemplate tx;
+  public final TursoDb jdbc;
+  public final TursoDb tx;
 
-  public JobStore(JdbcTemplate jdbc, TransactionTemplate tx) {
-    this.jdbc = jdbc;
-    this.tx = tx;
+  public JobStore(TursoDb db) {
+    this.jdbc = db;
+    this.tx = db;
   }
 
   public UUID user(String subject) {
@@ -47,12 +45,8 @@ public class JobStore {
     for (String state :
         List.of("UPLOADING", "QUEUED", "PROCESSING", "RETRY_WAIT", "SUCCEEDED", "FAILED"))
       counts.put(state, 0L);
-    jdbc.query(
-        "SELECT status,count(*) AS n FROM documents WHERE job_id=? GROUP BY status",
-        rs -> {
-          counts.put(rs.getString("status"), rs.getLong("n"));
-        },
-        job);
+    for(var row:jdbc.queryForList("SELECT status,count(*) AS n FROM documents WHERE job_id=? GROUP BY status",job))
+      counts.put((String)row.get("status"),((Number)row.get("n")).longValue());
     result.put("counts", counts);
     result.put(
         "uploaded",

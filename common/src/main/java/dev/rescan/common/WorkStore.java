@@ -26,7 +26,7 @@ public class WorkStore {
           if (refs.isEmpty()) return null;
           UUID job = (UUID) refs.getFirst().get("job_id");
           var states =
-              store.jdbc.queryForList("SELECT status FROM jobs WHERE id=? FOR UPDATE", job);
+              store.jdbc.queryForList("SELECT status FROM jobs WHERE id=?", job);
           if (states.isEmpty()
               || !Set.of("QUEUED", "PROCESSING").contains(states.getFirst().get("status")))
             return null;
@@ -35,15 +35,15 @@ public class WorkStore {
               store.jdbc.queryForList(
                   """
                   UPDATE documents SET status='PROCESSING', attempts=attempts+1, token=?,
-                    lease_until=now()+interval '2 minutes',updated_at=now()
-                  WHERE id=? AND status IN ('QUEUED','RETRY_WAIT') AND available_at<=now() AND attempts<3
+                    lease_until=unixepoch()+120,updated_at=unixepoch()
+                  WHERE id=? AND status IN ('QUEUED','RETRY_WAIT') AND available_at<=unixepoch() AND attempts<3
                   RETURNING *
                   """,
                   token,
                   document);
           if (rows.isEmpty()) return null;
           var d = rows.getFirst();
-          store.jdbc.update("UPDATE jobs SET status='PROCESSING',updated_at=now() WHERE id=?", job);
+          store.jdbc.update("UPDATE jobs SET status='PROCESSING',updated_at=unixepoch() WHERE id=?", job);
           store.jdbc.update(
               "INSERT INTO processing_attempts(token,document_id,attempt) VALUES (?,?,?)",
               token,
@@ -63,8 +63,8 @@ public class WorkStore {
 
   public boolean heartbeat(Claim c) {
     return store.jdbc.update(
-            "UPDATE documents SET lease_until=now()+interval '2 minutes' WHERE id=? AND token=? AND"
-                + " status='PROCESSING' AND lease_until>now() AND EXISTS(SELECT 1 FROM jobs WHERE"
+            "UPDATE documents SET lease_until=unixepoch()+120 WHERE id=? AND token=? AND"
+                + " status='PROCESSING' AND lease_until>unixepoch() AND EXISTS(SELECT 1 FROM jobs WHERE"
                 + " id=documents.job_id AND status<>'DELETING')",
             c.id(),
             c.token())
@@ -72,22 +72,24 @@ public class WorkStore {
   }
 
   public boolean complete(Claim c, String key, Runnable upload) {
+    if (!lock(c)) return false;
+    store.jdbc.update("INSERT INTO orphan_results(key) VALUES(?) ON CONFLICT(key) DO NOTHING",key);
+    upload.run();
     return Boolean.TRUE.equals(
         store.tx.execute(
             tx -> {
               if (!lock(c)) return false;
-              // The job lock serializes publication with deletion, including the S3 write.
-              upload.run();
               store.jdbc.update(
                   "UPDATE documents SET"
-                      + " status='SUCCEEDED',result_key=?,error_code=NULL,lease_until=NULL,updated_at=now()"
+                      + " status='SUCCEEDED',result_key=?,error_code=NULL,lease_until=NULL,updated_at=unixepoch()"
                       + " WHERE id=? AND token=?",
                   key,
                   c.id(),
                   c.token());
               store.jdbc.update(
-                  "UPDATE processing_attempts SET finished_at=now() WHERE token=?", c.token());
+                  "UPDATE processing_attempts SET finished_at=unixepoch() WHERE token=?", c.token());
               refresh(c.jobId());
+              store.jdbc.update("DELETE FROM orphan_results WHERE key=?",key);
               return true;
             }));
   }
@@ -101,20 +103,18 @@ public class WorkStore {
               int delay = c.attempt() == 1 ? 30 : 120;
               store.jdbc.update(
                   "UPDATE documents SET"
-                      + " status=?,error_code=?,lease_until=NULL,available_at=now()+(? * interval"
-                      + " '1 second'),updated_at=now() WHERE id=?",
+                      + " status=?,error_code=?,lease_until=NULL,available_at=unixepoch()+?,updated_at=unixepoch() WHERE id=?",
                   retry ? "RETRY_WAIT" : "FAILED",
                   code,
                   delay,
                   c.id());
               store.jdbc.update(
-                  "UPDATE processing_attempts SET finished_at=now(),error_code=? WHERE token=?",
+                  "UPDATE processing_attempts SET finished_at=unixepoch(),error_code=? WHERE token=?",
                   code,
                   c.token());
               if (retry)
                 store.jdbc.update(
-                    "INSERT INTO outbox(document_id,available_at) VALUES (?,now()+(? * interval '1"
-                        + " second')) ON CONFLICT(document_id) DO UPDATE SET"
+                    "INSERT INTO outbox(document_id,available_at) VALUES (?,unixepoch()+?) ON CONFLICT(document_id) DO UPDATE SET"
                         + " available_at=EXCLUDED.available_at",
                     c.id(),
                     delay);
@@ -124,12 +124,12 @@ public class WorkStore {
   }
 
   private boolean lock(Claim c) {
-    var jobs = store.jdbc.queryForList("SELECT status FROM jobs WHERE id=? FOR UPDATE", c.jobId());
+    var jobs = store.jdbc.queryForList("SELECT status FROM jobs WHERE id=?", c.jobId());
     if (jobs.isEmpty() || "DELETING".equals(jobs.getFirst().get("status"))) return false;
     return Boolean.TRUE.equals(
         store.jdbc.queryForObject(
             "SELECT EXISTS(SELECT 1 FROM documents WHERE id=? AND token=? AND status='PROCESSING'"
-                + " AND lease_until>now())",
+                + " AND lease_until>unixepoch())",
             Boolean.class,
             c.id(),
             c.token()));
@@ -142,7 +142,7 @@ public class WorkStore {
           WHEN EXISTS(SELECT 1 FROM documents WHERE job_id=? AND status NOT IN ('SUCCEEDED','FAILED')) THEN 'PROCESSING'
           WHEN NOT EXISTS(SELECT 1 FROM documents WHERE job_id=? AND status<>'SUCCEEDED') THEN 'SUCCEEDED'
           WHEN NOT EXISTS(SELECT 1 FROM documents WHERE job_id=? AND status='SUCCEEDED') THEN 'FAILED'
-          ELSE 'PARTIAL_SUCCESS' END,updated_at=now()
+          ELSE 'PARTIAL_SUCCESS' END,updated_at=unixepoch()
         WHERE id=? AND status<>'DELETING'
         """,
         job,
@@ -155,23 +155,23 @@ public class WorkStore {
     var jobs =
         store.jdbc.queryForList(
             "SELECT DISTINCT job_id FROM documents WHERE status='PROCESSING' AND"
-                + " lease_until<now()");
+                + " lease_until<unixepoch()");
     for (var row : jobs)
       store.tx.executeWithoutResult(
           tx -> {
             UUID job = (UUID) row.get("job_id");
             var states =
-                store.jdbc.queryForList("SELECT status FROM jobs WHERE id=? FOR UPDATE", job);
+                store.jdbc.queryForList("SELECT status FROM jobs WHERE id=?", job);
             if (states.isEmpty() || "DELETING".equals(states.getFirst().get("status"))) return;
             store.jdbc.update(
-                "UPDATE processing_attempts SET finished_at=now(),error_code='LEASE_EXPIRED' WHERE"
+                "UPDATE processing_attempts SET finished_at=unixepoch(),error_code='LEASE_EXPIRED' WHERE"
                     + " token IN (SELECT token FROM documents WHERE job_id=? AND"
-                    + " status='PROCESSING' AND lease_until<now())",
+                    + " status='PROCESSING' AND lease_until<unixepoch())",
                 job);
             store.jdbc.update(
                 "UPDATE documents SET status=CASE WHEN attempts>=3 THEN 'FAILED' ELSE 'RETRY_WAIT'"
-                    + " END,error_code='LEASE_EXPIRED',lease_until=NULL,available_at=now(),updated_at=now()"
-                    + " WHERE job_id=? AND status='PROCESSING' AND lease_until<now()",
+                    + " END,error_code='LEASE_EXPIRED',lease_until=NULL,available_at=unixepoch(),updated_at=unixepoch()"
+                    + " WHERE job_id=? AND status='PROCESSING' AND lease_until<unixepoch()",
                 job);
             refresh(job);
           });
@@ -180,7 +180,7 @@ public class WorkStore {
         INSERT INTO outbox(document_id,available_at)
         SELECT d.id,d.available_at FROM documents d JOIN jobs j ON j.id=d.job_id
         WHERE j.status IN ('QUEUED','PROCESSING') AND d.status IN ('QUEUED','RETRY_WAIT')
-          AND (d.last_enqueued_at IS NULL OR d.last_enqueued_at<now()-interval '2 minutes')
+          AND (d.last_enqueued_at IS NULL OR d.last_enqueued_at<unixepoch()-120)
         ON CONFLICT(document_id) DO NOTHING
         """);
   }
@@ -190,12 +190,12 @@ public class WorkStore {
     for (int batch = 0; batch < 40; batch++) {
       var rows =
           store.jdbc.queryForList(
-              "SELECT document_id,available_at FROM outbox WHERE available_at<=now() ORDER BY"
+              "SELECT document_id,available_at FROM outbox WHERE available_at<=unixepoch() ORDER BY"
                   + " available_at LIMIT 100");
       for (var row : rows) {
         UUID id = (UUID) row.get("document_id");
         queue.publish(id);
-        store.jdbc.update("UPDATE documents SET last_enqueued_at=now() WHERE id=?", id);
+        store.jdbc.update("UPDATE documents SET last_enqueued_at=unixepoch() WHERE id=?", id);
         // Do not erase a retry scheduled after this publication.
         store.jdbc.update(
             "DELETE FROM outbox WHERE document_id=? AND available_at=?",
