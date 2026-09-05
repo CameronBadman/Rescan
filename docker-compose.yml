@@ -20,12 +20,43 @@ services:
     volumes:
       - minio-data:/data
 
+  # Qwen3.8-27B on vLLM. Needs an NVIDIA GPU with ~60 GB for bf16 (or use
+  # Qwen/Qwen3.8-27B-FP8 on ~30 GB). Comment this service out and point
+  # RESCAN_LLM_BASE_URL at an existing server if inference runs elsewhere.
+  vllm:
+    image: vllm/vllm-openai:latest
+    restart: unless-stopped
+    command: >
+      --model ${RESCAN_LLM_MODEL:-Qwen/Qwen3.8-27B}
+      --served-model-name ${RESCAN_LLM_MODEL:-Qwen/Qwen3.8-27B}
+      --max-model-len 32768
+      --max-num-seqs 32
+      --gpu-memory-utilization 0.90
+      --reasoning-parser qwen3
+      --default-chat-template-kwargs '{"enable_thinking": false}'
+      --limit-mm-per-prompt '{"image": 0, "video": 0}'
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   rescan:
     build: .
     restart: unless-stopped
     depends_on:
       - tika
       - minio
+      - vllm
     ports:
       - "8080:8080"
     volumes:
@@ -33,9 +64,10 @@ services:
     environment:
       RESCAN_TIKA_URL: http://tika:9998
       # Point these at the vLLM or SGLang deployment.
-      RESCAN_LLM_BACKEND: ${RESCAN_LLM_BACKEND:-stub}
-      RESCAN_LLM_BASE_URL: ${RESCAN_LLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      RESCAN_LLM_BACKEND: ${RESCAN_LLM_BACKEND:-openai}
+      RESCAN_LLM_BASE_URL: ${RESCAN_LLM_BASE_URL:-http://vllm:8000/v1}
       RESCAN_LLM_MODEL: ${RESCAN_LLM_MODEL:-Qwen/Qwen3.8-27B}
+      RESCAN_LLM_DISABLE_THINKING: "true"
       # Resumes are pulled from s3://<bucket>/<prefix>/<jobId>/.
       RESCAN_OBJECT_STORE: s3
       RESCAN_S3_ENDPOINT_URL: http://minio:9000
@@ -49,3 +81,4 @@ services:
 volumes:
   rescan-data:
   minio-data:
+  hf-cache:

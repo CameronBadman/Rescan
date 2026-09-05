@@ -54,7 +54,20 @@ class Settings(BaseSettings):
     llm_model: str = "Qwen/Qwen3.8-27B"
     llm_timeout_s: float = 180.0
     llm_max_concurrency: int = 16
+    # Sampling. Structured passes run near-greedy; Qwen's non-thinking
+    # recommendation is temperature 0.7 / top_p 0.8 / presence_penalty 1.5,
+    # which is what to move towards if greedy decoding starts repeating.
     llm_temperature: float = 0.0
+    llm_top_p: float | None = None
+    llm_presence_penalty: float | None = None
+    # Open reasoning models (Qwen3.x) think by default. Every pass here already
+    # carries its reasoning in the schema where it needs it, so thinking is
+    # turned off per request via chat_template_kwargs; any <think> block that
+    # arrives anyway is stripped before JSON parsing.
+    llm_disable_thinking: bool = True
+    # Qwen3.8's reasoning_effort dial ("low" | "medium" | "xhigh"); only sent
+    # when thinking is left on.
+    llm_reasoning_effort: str | None = None
 
     # Ensemble members for the borderline pass. Falls back to `llm_model`
     # repeated with different seeds when only one model is served.

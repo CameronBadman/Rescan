@@ -65,10 +65,44 @@ export RESCAN_LLM_BASE_URL=http://gpu-host:8000/v1
 export RESCAN_LLM_MODEL=Qwen/Qwen3.8-27B
 ```
 
-vLLM and SGLang both serve the OpenAI-compatible surface this expects, and both
-do continuous batching behind it, which is what makes a bulk upload tractable.
-The client negotiates schema-guided decoding (`json_schema`, then `guided_json`,
-then plain JSON mode) and caches whichever the server accepted.
+### The model
+
+The system is built for an open-weights model — no proprietary API in the
+loop. The target is **[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B)**
+(Apache 2.0, 27B dense, 262k context): `scripts/serve_vllm.sh` starts it with
+the flags that matter, and `docker-compose.yml` carries the same as a `vllm`
+service. vLLM, SGLang and llama.cpp all expose the OpenAI-compatible surface
+the client speaks; the first two do continuous batching behind it, which is
+what makes a bulk upload tractable.
+
+Two things the client handles for open reasoning models:
+
+- **Thinking is off per request.** Qwen3.x thinks by default. Every pass here
+  already carries its reasoning in its schema where it needs it (the compile
+  pass writes `reasoning` before `rules`; the judge writes `reasoning` before
+  `answer`), so the client sends `chat_template_kwargs: {"enable_thinking":
+  false}` and strips any `<think>` block that arrives anyway before parsing.
+  Leave thinking on with `RESCAN_LLM_DISABLE_THINKING=false` and set
+  `RESCAN_LLM_REASONING_EFFORT=low|medium|xhigh` if a pass needs it; the vLLM
+  script configures the `qwen3` reasoning parser so the thinking then lands in
+  `reasoning_content`, not in the JSON.
+- **Structured output is negotiated, not assumed.** The client probes
+  `json_schema` (vLLM, SGLang, current llama.cpp), then llama.cpp's older
+  `json_object`+`schema`, then vLLM's `guided_json`, then plain JSON mode, and
+  remembers what the server accepted — including whether it tolerates the
+  extra request fields. A rejection is recognised by its body as well as its
+  status, because llama.cpp's server answers an unsupported style with a 500.
+
+Once a server is up, run the smoke test before anything else. It sends each
+pass one real request, validates the JSON against the pass's contract, reports
+the negotiated style, latency and token counts, then runs one whole job:
+
+```bash
+RESCAN_LLM_BACKEND=openai RESCAN_LLM_BASE_URL=http://gpu-host:8000/v1 \
+  python -m scripts.smoke_real_model
+```
+
+`GET /health/llm` reports the same reachability and negotiated style live.
 
 ## API
 

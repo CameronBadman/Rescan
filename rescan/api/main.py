@@ -86,7 +86,7 @@ app = FastAPI(
 # --------------------------------------------------------------------------
 
 # Health is public so a load balancer can probe it without a credential.
-PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+PUBLIC_PATHS = {"/health", "/health/llm", "/docs", "/redoc", "/openapi.json"}
 
 
 def _presented_key(request: Request) -> str | None:
@@ -186,6 +186,37 @@ def _rule_set_payload(rule_set) -> dict[str, Any]:
         "requirements": len(rule_set.requirements),
         "preferences": len(rule_set.preferences),
         "flagged": len(rule_set.flagged),
+    }
+
+
+@app.get("/health/llm")
+def health_llm() -> dict[str, Any]:
+    """Whether the inference server is reachable and serving the configured model.
+
+    Kept separate from /health so a load balancer probe never waits on the GPU
+    host. Public, like /health.
+    """
+    if settings.llm_backend != "openai":
+        return {"backend": settings.llm_backend, "reachable": True, "model": "stub", "served": ["stub"]}
+    from rescan.llm.client import LLMError, OpenAICompatClient
+
+    inner = getattr(state.runner.client, "inner", state.runner.client)
+    probe = inner if isinstance(inner, OpenAICompatClient) else OpenAICompatClient()
+    try:
+        served = probe.served_models()
+    except LLMError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"backend": "openai", "reachable": False, "model": settings.llm_model, "error": str(exc)},
+        )
+    return {
+        "backend": "openai",
+        "reachable": True,
+        "model": settings.llm_model,
+        "served": served,
+        "model_served": settings.llm_model in served,
+        "structured_output": probe._schema_mode,
+        "thinking_disabled": settings.llm_disable_thinking,
     }
 
 

@@ -1,0 +1,201 @@
+"""The real client against fake servers: negotiation, thinking, recovery."""
+
+import json
+
+import httpx
+import pytest
+
+from rescan.config import settings
+from rescan.llm.client import (
+    SCHEMA_MODES,
+    LLMError,
+    LLMRequest,
+    OpenAICompatClient,
+    parse_json_lenient,
+    strip_thinking,
+)
+
+SCHEMA = {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "string"}}}
+
+
+def request(**kwargs) -> LLMRequest:
+    base = dict(task="probe", system="s", user="u", schema=SCHEMA)
+    base.update(kwargs)
+    return LLMRequest(**base)
+
+
+def completion(content: str, *, reasoning: str | None = None, usage=None) -> dict:
+    message = {"role": "assistant", "content": content}
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
+    body = {"model": "fake", "choices": [{"message": message}]}
+    if usage:
+        body["usage"] = usage
+    return body
+
+
+class FakeServer:
+    """Scripted OpenAI-compatible server. `policy(payload) -> (status, body)`."""
+
+    def __init__(self, policy):
+        self.policy = policy
+        self.requests: list[dict] = []
+
+    def handler(self, req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "fake"}]})
+        payload = json.loads(req.content)
+        self.requests.append(payload)
+        status, body = self.policy(payload)
+        return httpx.Response(status, json=body if isinstance(body, dict) else {"error": body})
+
+    def client(self) -> OpenAICompatClient:
+        client = OpenAICompatClient(base_url="http://fake/v1", model="fake")
+        client._client = httpx.Client(transport=httpx.MockTransport(self.handler))
+        return client
+
+
+def style_of(payload: dict) -> str:
+    fmt = payload.get("response_format") or {}
+    if "guided_json" in payload:
+        return "guided_json"
+    if fmt.get("type") == "json_schema":
+        return "json_schema"
+    if fmt.get("type") == "json_object" and "schema" in fmt:
+        return "json_object_schema"
+    if fmt.get("type") == "json_object":
+        return "json_object"
+    return "none"
+
+
+# --------------------------------------------------------------------------
+# Thinking
+# --------------------------------------------------------------------------
+
+
+def test_think_blocks_are_stripped_before_parsing():
+    assert strip_thinking('<think>\nhmm\n</think>\n{"a": 1}') == '{"a": 1}'
+    assert strip_thinking('<think>never closed {"a": 1}') == '{"a": 1}'
+    assert strip_thinking('{"a": 1}') == '{"a": 1}'
+    assert parse_json_lenient('<think>reasoning</think>```json\n{"answer": "x"}\n```') == {"answer": "x"}
+
+
+def test_thinking_is_disabled_per_request_by_default(monkeypatch):
+    monkeypatch.setattr(settings, "llm_disable_thinking", True)
+    server = FakeServer(lambda p: (200, completion('{"answer": "x"}')))
+    server.client().json_call(request())
+    assert server.requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in server.requests[0]
+
+
+def test_reasoning_effort_is_sent_only_when_thinking_is_on(monkeypatch):
+    monkeypatch.setattr(settings, "llm_disable_thinking", False)
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "low")
+    server = FakeServer(lambda p: (200, completion('{"answer": "x"}')))
+    server.client().json_call(request())
+    assert server.requests[0]["reasoning_effort"] == "low"
+    assert "chat_template_kwargs" not in server.requests[0]
+
+
+def test_reasoning_that_exhausts_the_budget_is_an_error_not_empty_data():
+    server = FakeServer(lambda p: (200, completion("", reasoning="I was thinking about...")))
+    with pytest.raises(LLMError, match="max_tokens"):
+        server.client().json_call(request())
+
+
+# --------------------------------------------------------------------------
+# Negotiation
+# --------------------------------------------------------------------------
+
+
+def test_vllm_style_server_takes_json_schema_with_extras_first_try():
+    server = FakeServer(lambda p: (200, completion('{"answer": "x"}', usage={"prompt_tokens": 10, "completion_tokens": 3})))
+    client = server.client()
+    response = client.json_call(request())
+    assert len(server.requests) == 1
+    assert style_of(server.requests[0]) == "json_schema"
+    assert response.backend == "openai:json_schema"
+    assert (response.prompt_tokens, response.completion_tokens) == (10, 3)
+    assert client._schema_mode == "json_schema" and client._send_extras is True
+
+
+def test_llama_cpp_style_500_validation_error_moves_to_the_next_style():
+    def policy(payload):
+        if style_of(payload) == "json_schema":
+            return 500, {"error": {"message": "1 validation error: response_format.type Input should be 'text' or 'json_object'"}}
+        return 200, completion('{"answer": "x"}')
+
+    server = FakeServer(policy)
+    client = server.client()
+    response = client.json_call(request())
+    assert response.backend == "openai:json_object_schema", "the enforcing style is preferred over guided_json"
+    assert [style_of(p) for p in server.requests] == ["json_schema", "json_schema", "json_object_schema"]
+    assert client._schema_mode == "json_object_schema"
+
+
+def test_server_that_rejects_extra_fields_gets_them_dropped(monkeypatch):
+    monkeypatch.setattr(settings, "llm_disable_thinking", True)
+
+    def policy(payload):
+        if "chat_template_kwargs" in payload:
+            return 422, {"detail": "extra fields not permitted: chat_template_kwargs"}
+        return 200, completion('{"answer": "x"}')
+
+    server = FakeServer(policy)
+    client = server.client()
+    client.json_call(request())
+    assert client._send_extras is False
+    client.json_call(request())
+    assert "chat_template_kwargs" not in server.requests[-1]
+    assert len(server.requests) == 3, "the negotiated combination is remembered"
+
+
+def test_probe_stops_at_the_first_working_style_and_remembers_it():
+    def policy(payload):
+        style = style_of(payload)
+        if style in ("json_schema", "json_object_schema"):
+            return 400, {"error": f"{style} not supported"}
+        return 200, completion('{"answer": "x"}')
+
+    server = FakeServer(policy)
+    client = server.client()
+    client.json_call(request())
+    client.json_call(request())
+    styles = [style_of(p) for p in server.requests]
+    assert styles[-2:] == ["guided_json", "guided_json"]
+    assert client._schema_mode == "guided_json"
+
+
+def test_a_real_server_error_after_negotiation_is_raised_not_retried_as_a_probe():
+    calls = {"n": 0}
+
+    def policy(payload):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 200, completion('{"answer": "x"}')
+        return 500, {"error": {"message": "CUDA out of memory"}}
+
+    server = FakeServer(policy)
+    client = server.client()
+    client.json_call(request())
+    with pytest.raises(LLMError, match="500"):
+        client.json_call(request())
+    assert calls["n"] == 2
+
+
+def test_no_style_accepted_is_a_clear_error():
+    server = FakeServer(lambda p: (400, {"error": "no"}))
+    with pytest.raises(LLMError, match="no supported JSON mode"):
+        server.client().json_call(request())
+
+
+def test_every_style_is_a_distinct_request_shape():
+    seen = set()
+    client = FakeServer(lambda p: (200, completion("{}"))).client()
+    for mode in SCHEMA_MODES:
+        seen.add(style_of(client._payload(request(), mode, with_extras=False)))
+    assert seen == set(SCHEMA_MODES)
+
+
+def test_served_models_lists_the_server_catalogue():
+    assert FakeServer(lambda p: (200, {})).client().served_models() == ["fake"]

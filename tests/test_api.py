@@ -214,3 +214,17 @@ def test_unreadable_direct_upload_is_dead_lettered_not_dropped(client):
     status = wait_for(client, response.json()["job_id"])
     assert status["counts"]["needs_manual_review"] == 1
     assert status["counts"]["failed"] == 0
+
+
+def test_llm_health_reports_the_stub_without_a_network_call(client):
+    body = client.get("/health/llm").json()
+    assert body["reachable"] is True and body["backend"] == "stub"
+
+
+def test_llm_health_reports_an_unreachable_server_as_503(client, monkeypatch):
+    from rescan.llm.client import LLMError
+
+    monkeypatch.setattr(settings, "llm_backend", "openai")
+    monkeypatch.setattr("rescan.llm.client.OpenAICompatClient.served_models", lambda self: (_ for _ in ()).throw(LLMError("down")))
+    response = client.get("/health/llm")
+    assert response.status_code == 503 and response.json()["reachable"] is False
