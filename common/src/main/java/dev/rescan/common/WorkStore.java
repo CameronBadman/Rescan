@@ -155,7 +155,7 @@ public class WorkStore {
     var jobs =
         store.jdbc.queryForList(
             "SELECT DISTINCT job_id FROM documents WHERE status='PROCESSING' AND"
-                + " lease_until<unixepoch()");
+                + " lease_until<unixepoch() LIMIT 10");
     for (var row : jobs)
       store.tx.executeWithoutResult(
           tx -> {
@@ -186,22 +186,26 @@ public class WorkStore {
   }
 
   public void dispatch(Queue queue) {
+    dispatch(queue,System.nanoTime()+java.time.Duration.ofSeconds(30).toNanos());
+  }
+  public void dispatch(Queue queue,long deadline) {
     // A crash after XADD but before commit duplicates delivery; claim/completion are idempotent.
     for (int batch = 0; batch < 40; batch++) {
+      if(System.nanoTime()>deadline) break;
       var rows =
           store.jdbc.queryForList(
               "SELECT document_id,available_at FROM outbox WHERE available_at<=unixepoch() ORDER BY"
                   + " available_at LIMIT 100");
-      for (var row : rows) {
-        UUID id = (UUID) row.get("document_id");
-        queue.publish(id);
-        store.jdbc.update("UPDATE documents SET last_enqueued_at=unixepoch() WHERE id=?", id);
-        // Do not erase a retry scheduled after this publication.
-        store.jdbc.update(
-            "DELETE FROM outbox WHERE document_id=? AND available_at=?",
-            id,
-            row.get("available_at"));
-      }
+      if(rows.isEmpty()) break;
+      queue.publishMany(rows.stream().map(r->(UUID)r.get("document_id")).toList());
+      try {
+        var entries=rows.stream().map(r->Map.of("id",r.get("document_id").toString(),"due",((java.sql.Timestamp)r.get("available_at")).getTime()/1000)).toList();
+        String payload=new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(entries);
+        store.tx.executeWithoutResult(tx->{
+          store.jdbc.update("UPDATE documents SET last_enqueued_at=unixepoch() WHERE id IN (SELECT json_extract(value,'$.id') FROM json_each(?))",payload);
+          store.jdbc.update("DELETE FROM outbox WHERE EXISTS(SELECT 1 FROM json_each(?) WHERE json_extract(value,'$.id')=outbox.document_id AND json_extract(value,'$.due')=outbox.available_at)",payload);
+        });
+      } catch(java.io.IOException e) { throw new IllegalStateException(e); }
       if (rows.size() < 100) break;
     }
   }

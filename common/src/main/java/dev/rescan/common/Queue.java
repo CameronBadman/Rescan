@@ -15,17 +15,7 @@ public class Queue implements AutoCloseable {
   }
 
   private static String redisUrl() {
-    String url = Settings.get("REDIS_URL", "");
-    if (url.isEmpty()) {
-      try (var secrets =
-          software.amazon.awssdk.services.secretsmanager.SecretsManagerClient.create()) {
-        url =
-            secrets
-                .getSecretValue(r -> r.secretId(Settings.require("REDIS_SECRET_ARN")))
-                .secretString();
-      }
-    }
-    return url;
+    return Secrets.get("REDIS_URL","REDIS_SECRET_ARN");
   }
 
   public Queue(String url) {
@@ -50,6 +40,15 @@ public class Queue implements AutoCloseable {
             STREAM,
             XAddArgs.Builder.maxlen(100000).approximateTrimming(),
             Map.of("documentId", document.toString()));
+  }
+
+  public void publishMany(List<UUID> documents) {
+    var futures=new ArrayList<io.lettuce.core.RedisFuture<String>>();
+    for(UUID id:documents) futures.add(connection.async().xadd(STREAM,XAddArgs.Builder.maxlen(100000).approximateTrimming(),Map.of("documentId",id.toString())));
+    for(var future:futures) {
+      try { future.get(10,java.util.concurrent.TimeUnit.SECONDS); }
+      catch(Exception e) { throw new IllegalStateException("Queue publication incomplete",e); }
+    }
   }
 
   public StreamMessage<String, String> receive(String consumer) {
