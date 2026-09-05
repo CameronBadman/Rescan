@@ -1,4 +1,7 @@
-variable "region" { type = string }
+variable "region" {
+  type    = string
+  default = "ap-southeast-2"
+}
 variable "name" {
   type    = string
   default = "rescan"
@@ -12,27 +15,40 @@ variable "route53_zone_id" { type = string }
 variable "frontend_origin" { type = string }
 variable "auth_callback_url" { type = string }
 variable "api_image" {
-  type        = string
-  default     = null
-  description = "Immutable ECR image URI; null uses the repository's bootstrap tag."
+  type = string
+  validation {
+    condition     = can(regex("@sha256:[a-f0-9]{64}$", var.api_image))
+    error_message = "Use a tested, digest-qualified API Lambda image."
+  }
 }
 variable "worker_image" {
-  type    = string
-  default = null
+  type = string
+  validation {
+    condition     = can(regex("@sha256:[a-f0-9]{64}$", var.worker_image))
+    error_message = "Use a tested, digest-qualified worker image."
+  }
 }
 variable "controller_jar" {
   type    = string
   default = "../controller/target/controller-0.1.0-SNAPSHOT.jar"
 }
-variable "db_instance_class" {
-  type    = string
-  default = "db.t4g.small"
+variable "turso_database_url" {
+  type = string
+  validation {
+    condition     = can(regex("^https://", var.turso_database_url))
+    error_message = "Supply the HTTPS Turso database endpoint."
+  }
 }
-variable "redis_node_type" {
-  type    = string
-  default = "cache.t4g.small"
+variable "turso_secret_arn" { type = string }
+variable "redis_secret_arn" { type = string }
+variable "operations_email" { type = string }
+variable "controller_enabled" {
+  type        = bool
+  default     = false
+  description = "Enable only after migrations and authenticated smoke checks."
 }
-variable "deletion_protection" {
-  type    = bool
-  default = true
+variable "worker_profile_verified" {
+  type        = bool
+  default     = false
+  description = "Set true only after the 1-vCPU/4-GB OCR acceptance benchmark passes."
 }

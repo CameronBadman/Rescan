@@ -42,65 +42,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "documents" {
     abort_incomplete_multipart_upload { days_after_initiation = 1 }
   }
 }
-resource "aws_db_subnet_group" "main" { subnet_ids = aws_subnet.private[*].id }
-resource "aws_db_instance" "main" {
-  identifier                  = var.name
-  engine                      = "postgres"
-  engine_version              = "17"
-  instance_class              = var.db_instance_class
-  allocated_storage           = 20
-  max_allocated_storage       = 100
-  storage_encrypted           = true
-  db_name                     = "rescan"
-  username                    = "rescan"
-  manage_master_user_password = true
-  db_subnet_group_name        = aws_db_subnet_group.main.name
-  vpc_security_group_ids      = [aws_security_group.data.id]
-  publicly_accessible         = false
-  multi_az                    = true
-  backup_retention_period     = 7
-  deletion_protection         = var.deletion_protection
-  skip_final_snapshot         = false
-  final_snapshot_identifier   = "${var.name}-final"
-}
-resource "random_password" "redis" {
-  length  = 40
-  special = false
-}
-resource "aws_elasticache_subnet_group" "main" {
-  name       = var.name
-  subnet_ids = aws_subnet.private[*].id
-}
-resource "aws_elasticache_replication_group" "main" {
-  replication_group_id       = var.name
-  description                = "Resume processing stream"
-  engine                     = "redis"
-  engine_version             = "7.1"
-  node_type                  = var.redis_node_type
-  num_cache_clusters         = 2
-  automatic_failover_enabled = true
-  multi_az_enabled           = true
-  at_rest_encryption_enabled = true
-  transit_encryption_enabled = true
-  auth_token                 = random_password.redis.result
-  parameter_group_name       = aws_elasticache_parameter_group.main.name
-  subnet_group_name          = aws_elasticache_subnet_group.main.name
-  security_group_ids         = [aws_security_group.data.id]
-  snapshot_retention_limit   = 1
-}
-resource "aws_elasticache_parameter_group" "main" {
-  name   = var.name
-  family = "redis7"
-  parameter {
-    name  = "maxmemory-policy"
-    value = "noeviction"
-  }
-}
-resource "aws_secretsmanager_secret" "redis" { name_prefix = "${var.name}-redis-" }
-resource "aws_secretsmanager_secret_version" "redis" {
-  secret_id     = aws_secretsmanager_secret.redis.id
-  secret_string = "rediss://:${random_password.redis.result}@${aws_elasticache_replication_group.main.primary_endpoint_address}:6379"
-}
 resource "aws_cognito_user_pool" "main" {
   name                     = var.name
   username_attributes      = ["email"]
