@@ -334,6 +334,43 @@ class RetryingClient:
 
 
 # --------------------------------------------------------------------------
+# Per-pass routing
+# --------------------------------------------------------------------------
+
+# The passes that read the whole plan and write the rule language. They run
+# once per job, so they can afford a bigger model than the per-candidate passes.
+COMPILE_TASKS = frozenset({"compile_dsl", "compile_dsl_repair"})
+
+
+class RoutingClient:
+    """Send named tasks to one server and everything else to another."""
+
+    def __init__(self, default: LLMClient, routes: dict[str, LLMClient]) -> None:
+        self.default = default
+        self.routes = routes
+
+    def json_call(self, request: LLMRequest) -> LLMResponse:
+        return self.routes.get(request.task, self.default).json_call(request)
+
+    def close(self) -> None:
+        for client in {id(c): c for c in [self.default, *self.routes.values()]}.values():
+            close = getattr(client, "close", None)
+            if close:
+                close()
+
+
+def _compile_client() -> OpenAICompatClient | None:
+    """A separate client for the compile passes when one is configured."""
+    if not (settings.compile_base_url or settings.compile_model):
+        return None
+    return OpenAICompatClient(
+        base_url=settings.compile_base_url or None,
+        api_key=settings.compile_api_key or None,
+        model=settings.compile_model or None,
+    )
+
+
+# --------------------------------------------------------------------------
 # Factory
 # --------------------------------------------------------------------------
 
@@ -341,7 +378,12 @@ class RetryingClient:
 def build_client(backend: str | None = None) -> LLMClient:
     backend = backend or settings.llm_backend
     if backend == "openai":
-        return RetryingClient(OpenAICompatClient())
+        bulk = OpenAICompatClient()
+        compile_client = _compile_client()
+        if compile_client is None:
+            return RetryingClient(bulk)
+        log.info("compile passes routed to %s (%s)", compile_client.base_url, compile_client.model)
+        return RetryingClient(RoutingClient(bulk, {task: compile_client for task in COMPILE_TASKS}))
     if backend == "stub":
         from rescan.llm.stub import StubClient
 

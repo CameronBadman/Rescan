@@ -10,6 +10,7 @@ from rescan.llm.client import (
     SCHEMA_MODES,
     LLMError,
     LLMRequest,
+    LLMResponse,
     OpenAICompatClient,
     parse_json_lenient,
     strip_thinking,
@@ -240,3 +241,46 @@ def test_schemas_avoid_keywords_grammar_decoders_cannot_handle():
         if name.endswith("_SCHEMA"):
             walk(getattr(prompts, name), name)
     assert found == [], found
+
+
+# --------------------------------------------------------------------------
+# Per-pass routing
+# --------------------------------------------------------------------------
+
+
+def test_compile_tasks_are_routed_to_the_compile_server(monkeypatch):
+    from rescan.llm.client import COMPILE_TASKS, RoutingClient
+
+    class Recorder:
+        def __init__(self, name):
+            self.name, self.tasks = name, []
+
+        def json_call(self, req):
+            self.tasks.append(req.task)
+            return LLMResponse(data={}, model=self.name, backend="fake", latency_s=0.0)
+
+    bulk, big = Recorder("bulk"), Recorder("big")
+    client = RoutingClient(bulk, {task: big for task in COMPILE_TASKS})
+    for task in ("structure", "compile_dsl", "judge", "compile_dsl_repair", "rank"):
+        client.json_call(request(task=task))
+    assert bulk.tasks == ["structure", "judge", "rank"]
+    assert big.tasks == ["compile_dsl", "compile_dsl_repair"]
+
+
+def test_build_client_routes_only_when_a_compile_server_is_configured(monkeypatch):
+    from rescan.llm.client import RetryingClient, RoutingClient, build_client
+
+    monkeypatch.setattr(settings, "compile_base_url", "")
+    monkeypatch.setattr(settings, "compile_model", "")
+    plain = build_client("openai")
+    assert isinstance(plain, RetryingClient) and isinstance(plain.inner, OpenAICompatClient)
+
+    monkeypatch.setattr(settings, "compile_base_url", "http://big-host:8000/v1")
+    monkeypatch.setattr(settings, "compile_model", "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8")
+    routed = build_client("openai")
+    assert isinstance(routed.inner, RoutingClient)
+    compile_client = routed.inner.routes["compile_dsl"]
+    assert compile_client.base_url == "http://big-host:8000/v1"
+    assert compile_client.model == "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+    assert routed.inner.default.model == settings.llm_model
+    routed.close()

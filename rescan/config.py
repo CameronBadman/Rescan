@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     # when thinking is left on.
     llm_reasoning_effort: str | None = None
 
+    # Route the plan-compile pass (and its repair round) to a different, usually
+    # larger, model. It runs once per job and is where model quality shows;
+    # the per-candidate passes stay on `llm_model`. Empty means "same server".
+    compile_base_url: str = ""
+    compile_model: str = ""
+    compile_api_key: str = ""
+
     # Ensemble members for the borderline pass. Falls back to `llm_model`
     # repeated with different seeds when only one model is served.
     ensemble_models: Annotated[list[str], NoDecode] = []
