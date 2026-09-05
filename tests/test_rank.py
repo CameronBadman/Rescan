@@ -169,3 +169,75 @@ def test_shortlist_separates_manual_review_from_exclusion(llm):
     unknown = screen(candidate("Candidate 8", years=None), rule_set)
     shortlist = build_shortlist(make_scores([0.5]), ROLE, size=1, screening={"Candidate 8": unknown})
     assert shortlist.manual_review and not shortlist.excluded
+
+
+# --------------------------------------------------------------------------
+# PREFER clauses as criteria
+# --------------------------------------------------------------------------
+
+
+def test_prefer_clauses_become_the_criteria(llm):
+    from rescan.pipeline.rank import ROLE_RELEVANCE, criteria_for
+    from rescan.rules.classifier import compile_plan
+
+    rule_set = compile_plan(
+        "Must have 3+ years experience. Nice to have: Kubernetes. Terraform is preferred.", llm
+    )
+    criteria = criteria_for(rule_set)
+    keys = [c.key for c in criteria]
+    assert keys[-1] == ROLE_RELEVANCE.key, "the model keeps a holistic read"
+    assert len(criteria) == 3
+    assert all(c.clause is not None for c in criteria[:-1])
+    assert criteria_for(None) == DEFAULT_CRITERIA
+    assert criteria_for(compile_plan("Must have 3+ years experience.", llm)) == DEFAULT_CRITERIA
+
+
+def test_prefer_clauses_are_scored_by_the_rules_not_the_model(llm):
+    from rescan.dsl import parse_clause
+    from rescan.pipeline.rank import ROLE_RELEVANCE, Criterion
+
+    criteria = (
+        Criterion("k8s", "Kubernetes", 2.0, clause=parse_clause('PREFER skills HAS ANY ("Kubernetes")')),
+        Criterion("go", "Go", 1.0, clause=parse_clause('PREFER skills HAS ANY ("Go")')),
+        ROLE_RELEVANCE,
+    )
+    score = score_candidate(candidate("Candidate 1", skills=("Python", "Kubernetes")), ROLE, llm, criteria=criteria)
+    by_key = {c.criterion: c for c in score.criteria}
+    assert by_key["k8s"].score == 1.0 and "Kubernetes" in by_key["k8s"].evidence
+    assert by_key["go"].score == 0.0 and "Go" in by_key["go"].evidence
+    assert by_key["k8s"].weight == 2.0
+    assert "Rule-decided" in score.rationale
+
+
+def test_unknown_prefer_clause_is_left_to_the_model(llm, monkeypatch):
+    from rescan.dsl import parse_clause
+    from rescan.pipeline.rank import Criterion
+
+    sent = []
+    original = llm.json_call
+
+    def spy(request):
+        sent.append([c["key"] for c in request.context["criteria"]])
+        return original(request)
+
+    monkeypatch.setattr(llm, "json_call", spy)
+    criteria = (
+        Criterion("langs", "French", 1.0, clause=parse_clause('PREFER languages HAS ANY ("French")')),
+        Criterion("k8s", "Kubernetes", 1.0, clause=parse_clause('PREFER skills HAS ANY ("Kubernetes")')),
+    )
+    score = score_candidate(candidate("Candidate 1"), ROLE, llm, criteria=criteria)
+    assert sent == [["langs"]], "only the undecided criterion reaches the model"
+    assert {c.criterion for c in score.criteria} == {"langs", "k8s"}
+
+
+def test_fully_decided_candidate_needs_no_model_call(llm, monkeypatch):
+    from rescan.dsl import parse_clause
+    from rescan.pipeline.rank import Criterion
+
+    def boom(request):
+        raise AssertionError("the model must not be called")
+
+    monkeypatch.setattr(llm, "json_call", boom)
+    criteria = (Criterion("k8s", "Kubernetes", 1.0, clause=parse_clause('PREFER skills HAS ANY ("Kubernetes")')),)
+    score = score_candidate(candidate("Candidate 1"), ROLE, llm, criteria=criteria)
+    assert score.model == "rules" and score.score == 0.0

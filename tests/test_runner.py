@@ -152,3 +152,20 @@ def test_job_failure_is_recorded_rather_than_swallowed(runner, documents, monkey
     job = store.get_job(job_id)
     assert job["status"] == JobStatus.FAILED.value
     assert "inference cluster down" in job["error"]
+
+
+def test_plan_preferences_shape_the_shortlist_criteria(runner, documents):
+    pipeline, store = runner
+    job_id = pipeline.create_job(ROLE, documents)
+    shortlist = pipeline.run_job(
+        job_id, [], plan="Must have 2+ years of experience. Nice to have: Kubernetes. Python is preferred."
+    )
+    rules = store.get_job(job_id)["rules"]
+    preferred = [r["id"] for r in rules["rules"] if r["kind"] == "prefer" and r["clause"]]
+    assert len(preferred) == 2
+    entry = shortlist["entries"][0]
+    keys = {c["criterion"] for c in entry["criteria"]}
+    assert set(preferred) <= keys, "match scores decompose into the plan's PREFER clauses"
+    started = next(e for e in store.audit_trail(job_id) if e["event"] == "triage_started")
+    assert {c["key"] for c in started["detail"]["criteria"]} == keys
+    assert rules["reasoning"]

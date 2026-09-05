@@ -21,6 +21,7 @@ import statistics
 from concurrent.futures import ThreadPoolExecutor
 
 from rescan.config import settings
+from rescan.dsl.eval import JudgeLike
 from rescan.llm.client import LLMClient
 from rescan.pipeline.rank import DEFAULT_CRITERIA, Criterion, RankingError, score_candidate
 from rescan.schemas import AnonymizedProfile, CandidateScore, RoleSpec
@@ -48,6 +49,7 @@ def ensemble_score(
     cutoff: float,
     criteria: tuple[Criterion, ...] = DEFAULT_CRITERIA,
     models: list[str] | None = None,
+    judge: JudgeLike | None = None,
 ) -> CandidateScore:
     """Re-score one candidate with every ensemble member and combine the votes."""
     members = ensemble_members(models)
@@ -59,7 +61,7 @@ def ensemble_score(
         try:
             result = score_candidate(
                 profile, role, client,
-                criteria=criteria, model=model, seed=seed, pass_name="ensemble",
+                criteria=criteria, model=model, seed=seed, pass_name="ensemble", judge=judge,
             )
         except RankingError as exc:
             # One member failing must not sink the candidate; record and move on.
@@ -128,6 +130,8 @@ def ensemble_pass(
     size: int | None = None,
     workers: int | None = None,
     models: list[str] | None = None,
+    criteria: tuple[Criterion, ...] = DEFAULT_CRITERIA,
+    judge: JudgeLike | None = None,
 ) -> list[CandidateScore]:
     """Re-score `refs` with the ensemble and merge them back into `scores`."""
     if not refs:
@@ -144,7 +148,7 @@ def ensemble_pass(
     def rescore(ref: str) -> tuple[str, CandidateScore | None]:
         try:
             return ref, ensemble_score(
-                profiles[ref], role, client, cutoff=cutoff, models=models
+                profiles[ref], role, client, cutoff=cutoff, models=models, criteria=criteria, judge=judge,
             )
         except RankingError as exc:
             log.warning("ensemble pass failed for %s, keeping triage score: %s", ref, exc)

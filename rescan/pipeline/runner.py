@@ -25,7 +25,7 @@ from rescan.extract import Extractor, content_hash
 from rescan.llm.client import LLMClient
 from rescan.pipeline.anonymize import AnonymizationError, anonymize_resume
 from rescan.pipeline.ensemble import ensemble_pass
-from rescan.pipeline.rank import borderline_refs, build_shortlist, triage_rank
+from rescan.pipeline.rank import borderline_refs, build_shortlist, criteria_for, triage_rank
 from rescan.pipeline.structure import StructuringError, structure_resume
 from rescan.rules.classifier import compile_plan
 from rescan.rules.engine import ScreeningResult, screen
@@ -115,7 +115,7 @@ class PipelineRunner:
         try:
             rule_set = self._classify_rules(job_id, rule_texts, role, plan)
             profiles, screening = self._process_candidates(job_id, rule_set)
-            shortlist = self._rank(job_id, role, profiles, screening)
+            shortlist = self._rank(job_id, role, profiles, screening, rule_set)
         except Exception as exc:  # a job failure must be visible, not silent
             log.exception("job %s failed", job_id)
             self.store.update_job(job_id, status=JobStatus.FAILED.value, error=str(exc))
@@ -311,23 +311,30 @@ class PipelineRunner:
         def record(result, profile):
             self.store.audit(
                 job_id, "screening", "model_check",
-                candidate_id=candidate_id,
+                candidate_id=candidate_id or self._candidate_id_for(job_id, profile.candidate_ref),
                 detail={"candidate_ref": profile.candidate_ref, **result.to_dict()},
             )
 
         return Judge(self.client, ensemble=self.use_ensemble if ensemble is None else ensemble, on_check=record)
 
-    def _rank(self, job_id, role, profiles, screening):
+    def _rank(self, job_id, role, profiles, screening, rule_set=None):
         eligible = [
             profile for profile in profiles
             if screening.get(profile.candidate_ref) and screening[profile.candidate_ref].eligible
         ]
+        criteria = criteria_for(rule_set)
+        # Preferences only order candidates, so a single answer per ASK suffices.
+        judge = self._judge_for(job_id, None, ensemble=False)
         self.store.audit(
             job_id, "ranking", "triage_started",
-            detail={"eligible": len(eligible), "screened": len(profiles)},
+            detail={
+                "eligible": len(eligible),
+                "screened": len(profiles),
+                "criteria": [{"key": c.key, "description": c.description, "weight": c.weight} for c in criteria],
+            },
         )
-        scores = triage_rank(eligible, role, self.client) if eligible else []
-        scores = self._ensemble(job_id, role, scores, eligible, screening)
+        scores = triage_rank(eligible, role, self.client, criteria=criteria, judge=judge) if eligible else []
+        scores = self._ensemble(job_id, role, scores, eligible, screening, criteria, judge)
 
         for score in scores:
             candidate_id = self._candidate_id_for(job_id, score.candidate_ref)
@@ -349,7 +356,7 @@ class PipelineRunner:
         self.store.update_job(job_id, shortlist_json=shortlist.model_dump_json())
         return shortlist
 
-    def _ensemble(self, job_id, role, scores, eligible, screening):
+    def _ensemble(self, job_id, role, scores, eligible, screening, criteria, judge):
         """Re-score only the candidates whose placement is genuinely in doubt."""
         if not self.use_ensemble or not scores:
             return scores
@@ -377,7 +384,9 @@ class PipelineRunner:
         )
 
         profiles_by_ref = {profile.candidate_ref: profile for profile in eligible}
-        rescored = ensemble_pass(scores, profiles_by_ref, role, self.client, targets)
+        rescored = ensemble_pass(
+            scores, profiles_by_ref, role, self.client, targets, criteria=criteria, judge=judge
+        )
 
         for score in rescored:
             if score.pass_name != "ensemble" or not score.ensemble_votes:
