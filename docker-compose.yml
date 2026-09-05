@@ -1,0 +1,27 @@
+services:
+  tika:
+    image: apache/tika:2.9.2.1
+    restart: unless-stopped
+    expose:
+      - "9998"
+
+  rescan:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - tika
+    ports:
+      - "8080:8080"
+    volumes:
+      - rescan-data:/data
+    environment:
+      RESCAN_TIKA_URL: http://tika:9998
+      # Point these at the vLLM or SGLang deployment.
+      RESCAN_LLM_BACKEND: ${RESCAN_LLM_BACKEND:-stub}
+      RESCAN_LLM_BASE_URL: ${RESCAN_LLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      RESCAN_LLM_MODEL: ${RESCAN_LLM_MODEL:-Qwen/Qwen3.8-27B}
+      # Comma-separated. Leaving this empty runs the API unauthenticated.
+      RESCAN_API_KEYS: ${RESCAN_API_KEYS:-}
+
+volumes:
+  rescan-data:
