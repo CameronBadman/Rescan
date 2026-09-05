@@ -1,0 +1,28 @@
+[project]
+name = "rescan"
+version = "0.1.0"
+description = "Bias-aware applicant triage with an auditable rule engine"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "pydantic-settings",
+    "httpx",
+    "python-multipart",
+    "pypdf",
+    "python-docx",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["rescan*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
