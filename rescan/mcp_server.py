@@ -18,8 +18,12 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from rescan.aqf import AQF_LABELS, map_to_aqf
+from rescan.dsl import DslError, parse_expr, parse_program
+from rescan.dsl.fields import reference as dsl_reference
+from rescan.dsl.judge import Judge
 from rescan.llm.client import build_client
-from rescan.rules.classifier import classify_rule, classify_rules
+from rescan.pipeline.query import QueryRejected, run_query
+from rescan.rules.classifier import classify_rule, compile_plan
 from rescan.rules.statutes import RISK_PATTERNS, STATUTES, statute_citations
 
 server = MCPServer(
@@ -33,6 +37,7 @@ server = MCPServer(
 )
 
 _client = None
+_store = None
 
 
 def _llm():
@@ -41,6 +46,15 @@ def _llm():
     if _client is None:
         _client = build_client()
     return _client
+
+
+def _db():
+    global _store
+    if _store is None:
+        from rescan.store import Store
+
+        _store = Store()
+    return _store
 
 
 def _rule_payload(rule) -> dict[str, Any]:
@@ -97,12 +111,93 @@ def check_screening_rule(rule_text: str, role_context: str | None = None) -> dic
     ),
 )
 def check_screening_rules(rules: list[str], role_context: str | None = None) -> dict[str, Any]:
-    rule_set = classify_rules(rules, _llm(), role_context=role_context)
+    rule_set = compile_plan(None, _llm(), rule_texts=rules, role_context=role_context)
     return {
         "results": [_rule_payload(rule) for rule in rule_set.rules],
         "applied": len(rule_set.applied),
         "flagged": len(rule_set.flagged),
     }
+
+
+@server.tool(
+    name="compile_hiring_plan",
+    title="Compile a hiring plan into screening rules",
+    description=(
+        "Turn a recruiter's whole hiring plan — free text, any length — into rules "
+        "in the screening language, under Australian anti-discrimination law. The "
+        "model reasons over the plan with the statutes in front of it and returns "
+        "that reasoning with one compiled clause per requirement: REQUIRE clauses "
+        "screen, PREFER clauses rank. Proxies for protected attributes are flagged "
+        "with a statute and a rewrite, never compiled."
+    ),
+)
+def compile_hiring_plan(plan: str, role_context: str | None = None) -> dict[str, Any]:
+    rule_set = compile_plan(plan, _llm(), role_context=role_context)
+    return {
+        "reasoning": rule_set.reasoning,
+        "rules": [_rule_payload(rule) for rule in rule_set.rules],
+        "program": "\n".join(rule.dsl for rule in rule_set.applied if rule.dsl),
+        "applied": len(rule_set.applied),
+        "requirements": len(rule_set.requirements),
+        "preferences": len(rule_set.preferences),
+        "flagged": len(rule_set.flagged),
+    }
+
+
+@server.tool(
+    name="describe_query_language",
+    title="Describe the screening query language",
+    description=(
+        "The grammar, every queryable field and record, the aggregates, and every "
+        "forbidden identifier with the statute it engages. Read this before writing "
+        "a rule or a query by hand."
+    ),
+)
+def describe_query_language() -> dict[str, Any]:
+    return dsl_reference()
+
+
+@server.tool(
+    name="parse_query",
+    title="Validate a rule program or query",
+    description=(
+        "Parse text in the screening language without running it. Returns the "
+        "canonical form, or the error — a forbidden identifier comes back with its "
+        "legal basis and the alternative to use instead."
+    ),
+)
+def parse_query(dsl: str) -> dict[str, Any]:
+    text = dsl.strip()
+    try:
+        if text[:7].upper().startswith(("REQUIRE", "PREFER")):
+            program = parse_program(text)
+            return {"ok": True, "kind": "program", "canonical": program.to_dsl()}
+        expr = parse_expr(text)
+        return {"ok": True, "kind": "query", "canonical": expr.to_dsl()}
+    except DslError as exc:
+        return {"ok": False, "error": exc.to_dict()}
+
+
+@server.tool(
+    name="query_candidates",
+    title="Query a job's candidates",
+    description=(
+        "Run a query in the screening language over the anonymized profiles of a "
+        "processed job. Returns matched, not matched and undecided candidates by "
+        "reference with a plain-language reason each; never identity. Queries pass "
+        "the same legal gate as rules and are written to the job's audit trail."
+    ),
+)
+def query_candidates(job_id: str, dsl: str, model_checks: bool = True) -> dict[str, Any]:
+    judge = Judge(_llm(), ensemble=False) if model_checks else None
+    try:
+        return run_query(_db(), job_id, dsl, judge=judge, actor="mcp")
+    except KeyError:
+        return {"ok": False, "error": {"kind": "not_found", "message": f"unknown job {job_id!r}"}}
+    except DslError as exc:
+        return {"ok": False, "error": exc.to_dict()}
+    except QueryRejected as exc:
+        return {"ok": False, "error": exc.to_dict()}
 
 
 @server.tool(

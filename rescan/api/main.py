@@ -22,10 +22,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rescan.config import settings
+from rescan.dsl import DslError, parse_expr, parse_program
+from rescan.dsl.fields import reference as dsl_reference
 from rescan.extract import Extractor
 from rescan.llm.client import build_client
+from rescan.pipeline.query import QueryRejected, run_query
 from rescan.pipeline.runner import PipelineRunner
-from rescan.rules.classifier import classify_rule, classify_rules
+from rescan.rules.classifier import classify_rule, compile_plan
 from rescan.schemas import RoleSpec
 from rescan.store import Store
 
@@ -120,6 +123,21 @@ class RuleCheckRequest(BaseModel):
     role_context: str | None = None
 
 
+class PlanCompileRequest(BaseModel):
+    plan: str | None = Field(default=None, description="The recruiter's hiring plan, free text.")
+    rules: list[str] = Field(default_factory=list, description="Discrete rules, answered one each in order.")
+    role_context: str | None = None
+
+
+class DslParseRequest(BaseModel):
+    dsl: str = Field(description="A rule program (REQUIRE/PREFER clauses) or a bare query expression.")
+
+
+class QueryRequest(BaseModel):
+    dsl: str = Field(description="A bare expression in the rule language, e.g. years_experience >= 5 AND skills HAS ANY (\"Python\").")
+    model_checks: bool = Field(default=True, description="Whether ASK clauses are put to the model. Off, they evaluate to unknown.")
+
+
 class JobStatusResponse(BaseModel):
     job_id: str
     status: str
@@ -195,21 +213,83 @@ def health() -> dict[str, Any]:
     }
 
 
+def _rule_set_payload(rule_set) -> dict[str, Any]:
+    return {
+        "rules": [rule.model_dump(mode="json") for rule in rule_set.rules],
+        "reasoning": rule_set.reasoning,
+        "source_plan": rule_set.source_plan,
+        "applied": len(rule_set.applied),
+        "requirements": len(rule_set.requirements),
+        "preferences": len(rule_set.preferences),
+        "flagged": len(rule_set.flagged),
+    }
+
+
 @app.post("/rules/check")
 def check_rules(request: RuleCheckRequest) -> dict[str, Any]:
     """Review screening rules without running a batch.
 
     This is the fast path a recruiter uses while writing rules: it returns the
-    legal-risk finding, the statute basis and a measurable rewrite immediately.
+    legal-risk finding, the statute basis, a measurable rewrite and the compiled
+    clause immediately, one result per rule in order.
     """
     if not request.rules:
         raise HTTPException(status_code=400, detail="no rules supplied")
-    rule_set = classify_rules(request.rules, state.runner.client, role_context=request.role_context)
-    return {
-        "rules": [rule.model_dump(mode="json") for rule in rule_set.rules],
-        "applied": len(rule_set.applied),
-        "flagged": len(rule_set.flagged),
-    }
+    rule_set = compile_plan(None, state.runner.client, rule_texts=request.rules, role_context=request.role_context)
+    return _rule_set_payload(rule_set)
+
+
+@app.post("/rules/compile")
+def compile_hiring_plan(request: PlanCompileRequest) -> dict[str, Any]:
+    """Compile a recruiter's whole plan into the rule language.
+
+    The model reasons over the plan with the legal standing in front of it and
+    writes one clause per requirement; its reasoning comes back alongside the
+    rules so a reviewer can see how each arose. Nothing is run against
+    candidates here — pass the same plan to POST /jobs to screen a batch.
+    """
+    if not (request.plan and request.plan.strip()) and not any(r.strip() for r in request.rules):
+        raise HTTPException(status_code=400, detail="no plan or rules supplied")
+    rule_set = compile_plan(
+        request.plan, state.runner.client, rule_texts=request.rules, role_context=request.role_context
+    )
+    return _rule_set_payload(rule_set)
+
+
+# --------------------------------------------------------------------------
+# The rule language
+# --------------------------------------------------------------------------
+
+
+@app.get("/dsl/fields")
+def dsl_fields() -> dict[str, Any]:
+    """The language reference: grammar, every queryable field and record, the
+    aggregates, and every forbidden identifier with the statute it engages."""
+    return dsl_reference()
+
+
+@app.post("/dsl/parse")
+def dsl_parse(request: DslParseRequest) -> dict[str, Any]:
+    """Validate a program or query without running it — for a live editor.
+
+    A forbidden field comes back as 422 with the legal basis, so an editor can
+    show why the identifier is rejected rather than merely that it is.
+    """
+    text = request.dsl.strip()
+    is_program = text[:7].upper().startswith(("REQUIRE", "PREFER"))
+    try:
+        if is_program:
+            program = parse_program(text)
+            return {
+                "ok": True,
+                "kind": "program",
+                "canonical": program.to_dsl(),
+                "program": program.model_dump(mode="json"),
+            }
+        expr = parse_expr(text)
+        return {"ok": True, "kind": "query", "canonical": expr.to_dsl(), "expr": expr.model_dump(mode="json")}
+    except DslError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
 
 
 @app.post("/rules/check-one")
@@ -222,6 +302,7 @@ async def create_job(
     files: list[UploadFile] = File(..., description="Resumes, or a zip archive of them."),
     role: str = Form(..., description="RoleSpec as JSON."),
     rules: str = Form("[]", description="Recruiter rules as a JSON array of strings."),
+    plan: str | None = Form(None, description="The recruiter's hiring plan, free text; compiled into rules."),
 ) -> dict[str, Any]:
     """Accept a bulk upload and start processing. Returns a job id immediately."""
     try:
@@ -241,7 +322,7 @@ async def create_job(
         raise HTTPException(status_code=400, detail="no usable documents in the upload")
 
     job_id = state.runner.create_job(role_spec, documents)
-    state.pool.submit(_run_job_safely, job_id, rule_texts)
+    state.pool.submit(_run_job_safely, job_id, rule_texts, plan)
 
     return {
         "job_id": job_id,
@@ -250,9 +331,9 @@ async def create_job(
     }
 
 
-def _run_job_safely(job_id: str, rule_texts: list[str]) -> None:
+def _run_job_safely(job_id: str, rule_texts: list[str], plan: str | None = None) -> None:
     try:
-        state.runner.run_job(job_id, rule_texts)
+        state.runner.run_job(job_id, rule_texts, plan=plan)
     except Exception:
         # run_job already recorded the failure on the job and in the audit log.
         log.exception("background job %s failed", job_id)
@@ -326,6 +407,24 @@ def job_candidates(job_id: str, include_identity: bool = False) -> dict[str, Any
             candidate.pop("structured", None)
             candidate.pop("filename", None)
     return {"candidates": candidates}
+
+
+@app.post("/jobs/{job_id}/query")
+def job_query(job_id: str, request: QueryRequest) -> dict[str, Any]:
+    """Run a query in the rule language over the job's anonymized profiles.
+
+    Returns matched / not matched / indeterminate candidates, each with the
+    plain-language reason. Identity is never returned here. The query passes
+    the same legal gate as a rule and is written to the audit trail.
+    """
+    _require_job(job_id)
+    judge = state.runner._judge_for(job_id, None, ensemble=False) if request.model_checks else None
+    try:
+        return run_query(state.store, job_id, request.dsl, judge=judge)
+    except DslError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
+    except QueryRejected as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
 
 
 @app.get("/jobs/{job_id}/audit")
