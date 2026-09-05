@@ -49,7 +49,7 @@ resource "aws_iam_role_policy" "tasks" {
     { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_db_instance.main.master_user_secret[0].secret_arn] },
     { Effect = "Allow", Action = ["s3:GetObject", "s3:GetObjectVersion"], Resource = ["${aws_s3_bucket.documents.arn}/jobs/*"] },
     { Effect = "Allow", Action = ["s3:PutObject"], Resource = ["${aws_s3_bucket.documents.arn}/jobs/*/${each.key == "api" ? "originals" : "results"}/*"] }
-  ], each.key == "worker" ? [{ Effect = "Allow", Action = ["ecs:UpdateTaskProtection"], Resource = ["arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.main.name}/*"] }] : []) })
+  ], each.key == "worker" ? [{ Effect = "Allow", Action = ["ecs:UpdateTaskProtection"], Resource = ["arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.main.name}/*"] }] : [{ Effect = "Allow", Action = ["s3:ListBucket"], Resource = [aws_s3_bucket.documents.arn] }]) })
 }
 resource "aws_ecs_task_definition" "services" {
   for_each                 = toset(["api", "worker"])
@@ -230,5 +230,18 @@ resource "aws_cloudwatch_metric_alarm" "controller_errors" {
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+}
+resource "aws_cloudwatch_metric_alarm" "controller_missing" {
+  alarm_name          = "${var.name}-controller-missing"
+  namespace           = "AWS/Lambda"
+  metric_name         = "Invocations"
+  dimensions          = { FunctionName = aws_lambda_function.controller.function_name }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
 }

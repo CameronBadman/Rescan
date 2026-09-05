@@ -2,11 +2,13 @@
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from reading_order import order_lines
 
 
 def recognize(source):
+    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(Path(tempfile.gettempdir()) / "rescan-paddlex"))
     import numpy as np
     import torch
     from PIL import Image, ImageOps, ImageSequence
@@ -17,7 +19,7 @@ def recognize(source):
     Image.MAX_IMAGE_PIXELS = int(os.getenv("MAX_PAGE_PIXELS", "12000000"))
     max_pages = int(os.getenv("MAX_PAGES", "50"))
     root = os.getenv("VIT_MODEL_DIR", "/app/models/recognizer")
-    processor = TrOCRProcessor.from_pretrained(root, local_files_only=True)
+    processor = TrOCRProcessor.from_pretrained(root, local_files_only=True, use_fast=False)
     model = VisionEncoderDecoderModel.from_pretrained(root, local_files_only=True, use_safetensors=True).eval()
     detector = TextDetection(model_name="PP-OCRv5_mobile_det", model_dir=os.getenv("DETECTOR_MODEL_DIR", "/app/models/detector"), device="cpu", enable_mkldnn=False, cpu_threads=4)
     pages = []
@@ -41,7 +43,9 @@ def recognize(source):
                     crop = image.crop((int(x0), int(y0), int(x1), int(y1)))
                     pixels = processor(images=crop, return_tensors="pt").pixel_values
                     with torch.inference_mode():
-                        tokens = model.generate(pixels, max_new_tokens=256)
+                        tokens = model.generate(pixels, max_new_tokens=256, num_beams=4)
+                    if tokens.shape[-1] >= 257 and int(tokens[0, -1]) != model.config.decoder.eos_token_id:
+                        raise ValueError("TOKEN_LIMIT")
                     text = processor.batch_decode(tokens, skip_special_tokens=True)[0].strip()
                     if text:
                         lines.append({"text": text, "bbox": [int(x0), int(y0), int(x1), int(y1)]})
@@ -50,12 +54,18 @@ def recognize(source):
                 pages.append({"page": page, "width": image.width, "height": image.height, "method": "VIT", "lines": lines, "text": "\n".join(line["text"] for line in lines)})
     revisions = json.loads(Path(__file__).with_name("models.json").read_text())
     return {"text": "\n\n".join(p["text"] for p in pages), "pages": pages,
-            "extractionMethod": "VIT", "ocrUsed": True, "warnings": [],
+            "extractionMethod": "VIT", "ocrUsed": True,
+            "warnings": ["OCR may normalize letter case; review proper names."],
             "modelRevision": revisions["recognizer"]["revision"]}
 
 
 if __name__ == "__main__":
-    result = recognize(Path(sys.argv[1]))
-    if len(result["text"].encode("utf-8")) > 10 * 1024 * 1024:
-        raise ValueError("TEXT_LIMIT")
-    Path(sys.argv[2]).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    try:
+        result = recognize(Path(sys.argv[1]))
+        if len(result["text"].encode("utf-8")) > 10 * 1024 * 1024:
+            raise ValueError("TEXT_LIMIT")
+        Path(sys.argv[2]).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception as error:
+        code = str(error) if str(error) in {"PAGE_LIMIT", "IMAGE_LIMIT", "TEXT_LIMIT", "TOKEN_LIMIT"} else "OCR_FAILED"
+        Path(sys.argv[2]).write_text(json.dumps({"code": code}))
+        sys.exit(2)

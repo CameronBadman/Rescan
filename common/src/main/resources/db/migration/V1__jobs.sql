@@ -19,6 +19,7 @@ CREATE TABLE documents (
   id uuid PRIMARY KEY,
   job_id uuid NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   filename varchar(255) NOT NULL,
+  file_index integer NOT NULL DEFAULT 0,
   size_bytes bigint NOT NULL CHECK(size_bytes > 0),
   source_key text NOT NULL UNIQUE,
   source_version text,
@@ -32,6 +33,7 @@ CREATE TABLE documents (
   error_code text,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX documents_manifest_index ON documents(job_id,file_index);
 CREATE INDEX documents_job ON documents(job_id, id);
 CREATE INDEX documents_work ON documents(status, available_at);
 CREATE TABLE outbox (
