@@ -1,0 +1,35 @@
+{
+  "date": "2026-09-06",
+  "syntheticOnly": true,
+  "environment": "Local Linux CPU containers, network disabled, non-root, 4 GiB memory limit; not AWS",
+  "small": {
+    "modelRevision": "04e994ab854b0089d4929f48c2b4dbe2ce78a340",
+    "cpus": 1,
+    "beams": 1,
+    "modelReused": true,
+    "elapsedSeconds": 30.30282789699777,
+    "peakRssKiB": 1127532,
+    "meanNormalizedCER": 0.07234689107059374,
+    "fixtureSeconds": [12.681050520997815, 2.893087482996634, 2.7525988289999077, 2.9050883050003904, 2.7424108169980173, 6.1690109520022816],
+    "fixtureCER": [0.08695652173913043, 0.06521739130434782, 0.08695652173913043, 0.06521739130434782, 0.06521739130434782, 0.06451612903225806],
+    "cleanLargeActual": "JONE DUE\nSOFTWARE ENGINEER\nJAYA AND POSTGRESSQL"
+  },
+  "previous": {
+    "modelRevision": "93450be3f1ed40a930690d951ef3932687cc1892",
+    "cpus": 4,
+    "beams": 4,
+    "modelReused": false,
+    "elapsedSeconds": 143.38705947799826,
+    "peakRssKiB": 2557744,
+    "meanNormalizedCER": 0.02170017141966651,
+    "cleanLargeActual": "JANE DUE\nSOFTWARE ENGINEER\nJAVA AND POSTGRESQL"
+  },
+  "fixtures": ["clean-large", "clean-small", "blurred", "jpeg", "tiff", "multipage"],
+  "expectedSinglePage": "Jane Doe\nSoftware Engineer\nJava and PostgreSQL",
+  "limitations": [
+    "Only six synthetic fixtures and seven image pages; not representative resume accuracy.",
+    "Time comparison includes model reuse and different CPU allocations, not an isolated architecture benchmark.",
+    "Peak RSS measures the OCR process, not total Java worker plus parser memory.",
+    "Small-model recognition materially regresses proper names and technology spelling; manual acceptance remains required."
+  ]
+}

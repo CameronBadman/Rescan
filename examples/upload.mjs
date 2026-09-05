@@ -36,6 +36,7 @@ export async function uploadBatch(baseUrl, accessToken, files, idempotencyKey, o
   while (true) {
     const job = await request(`/${jobId}`);
     onProgress(job);
+    if (job.status === "UPLOADING") throw new Error(`Upload verification failed for ${jobId}; inspect document error_code values, correct uploads, and submit again.`);
     if (["SUCCEEDED", "PARTIAL_SUCCESS", "FAILED", "DELETING"].includes(job.status)) return job;
     await new Promise(resolve => setTimeout(resolve, 5000));
   }

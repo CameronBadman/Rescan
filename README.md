@@ -1,63 +1,43 @@
 # Rescan
 
-Batch resume processing: a Java API accepts **1–4,000 resumes**, returns a job ID, and exposes progress and JSON results. PostgreSQL holds users, IDs and job state; S3 holds originals and JSON; Redis Streams distributes documents to Java workers. Tika extracts document text. Images and scanned PDF pages use a pinned TrOCR vision encoder/text decoder through Python.
+A Java resume-batching backend accepting **1–4,000 files per job**. Turso stores user/job/document metadata, S3 stores originals and normalized JSON, and Redis Streams distributes work. Apache Tika extracts native text; TrOCR Small handles images and scanned PDF pages.
 
-## Run locally
+## Local staging
 
-Requirements: JDK 21, Maven 3.9+, Docker Compose (or a compatible Podman service), Python 3 and OpenSSL. The first worker-image build downloads approximately 1.3 GB of model weights plus ML dependencies.
-
-```sh
-docker compose up -d
-sh scripts/init-s3.sh
-cp .env.example .env
-set -a
-. ./.env
-set +a
-mvn verify
-```
-
-Run each service in a separate terminal with the same environment:
+Run the complete stack with Docker Compose:
 
 ```sh
-# Local-only JWT issuer; never expose this development utility publicly.
-python3 scripts/dev_auth.py
-
-java -jar api/target/api-0.1.0-SNAPSHOT.jar
-java -cp controller/target/controller-0.1.0-SNAPSHOT.jar dev.rescan.controller.Controller --loop
+docker compose up --build -d
+python3 scripts/smoke.py --timeout 600 --delete
 ```
 
-The API applies Flyway migrations at startup. Start it before the controller or workers. Stop local Java processes before rebuilding their jars. Obtain a development access token from `http://localhost:9000/token`; production uses Cognito authorization code + PKCE.
+The initial worker build downloads pinned OCR weights and dependencies. Compose starts libSQL, Redis, LocalStack, a migration job, development authentication, the API, controller, and one worker. Local volumes persist between starts. Stop with `docker compose down`; only use `down -v` when you intend to discard that Compose project's local test data.
 
-For native-document processing without installing the ML stack:
+API: http://localhost:8080. Local test token: http://localhost:9000/token. The unauthenticated development issuer is loopback-published and must never be deployed publicly.
 
-```sh
-java -jar worker/target/worker-0.1.0-SNAPSHOT.jar
-```
+Production uses Cognito access tokens. See [browser integration](examples/upload.mjs), [OpenAPI](docs/openapi.yaml), and [result JSON schema](docs/result.schema.json). No frontend application is included.
 
-For image/scanned-PDF processing, build the complete worker image and run it against the local services (Linux host networking):
+## Data flow
 
-```sh
-docker build --target worker -t rescan-worker:dev .
-docker run --rm --network host --env-file .env rescan-worker:dev
-```
+Create a manifest → receive job ID/upload URLs → upload directly to S3 → submit → `VERIFYING` → `QUEUED` → processing → JSON results.
 
-The API is at `http://localhost:8080`. See [the frontend integration example](examples/upload.mjs) and [OpenAPI contract](docs/openapi.yaml). No frontend application is included.
+Verification runs asynchronously in resumable chunks. Missing or invalid uploads return the job to `UPLOADING`; inspect document `error_code` values, correct the uploads, and resubmit. Existing uploaded objects cannot be overwritten through the issued URLs.
 
-## Processing behavior
+Turso is authoritative. Short transactions and attempt tokens fence concurrent workers; a durable outbox restores Redis work after a queue failure. S3 writes occur outside database transactions, with conditional publication and orphan cleanup.
 
-- Tika: text-bearing PDFs, DOC/DOCX, RTF, ODT, HTML, plain text, and other supported document formats.
-- ViT: PNG, JPEG, TIFF, BMP, and PDF pages without non-whitespace native text. Native PDF pages use Tika; page order is preserved.
-- Image recognition: PaddleOCR detects lines, then `microsoft/trocr-base-printed` recognizes printed English text. Bounding boxes use page-image pixels. Reading order uses whitespace-based column detection and may require review for unusual layouts.
-- The OCR checkpoint may uppercase text and misread proper names. The [measured synthetic benchmark](docs/ocr-benchmark.json) records this limitation; OCR results include a review warning.
-- JSON contains text and metadata, not inferred skills or employment fields. See [the JSON schema](docs/result.schema.json).
-- Unsupported, encrypted, corrupt, empty, and over-limit documents fail individually. Three attempts are allowed for transient failures; other resumes continue.
-- Defaults: 25 MiB/file, 5 GiB/batch, 50 PDF/image pages, 12 million pixels/page, 10 MiB extracted text, and 15 minutes/document. File/page/time limits have corresponding environment overrides in the implementation; the hard batch count is 4,000.
-- Signed upload URLs expire after 15 minutes and are paginated in groups of 100. They use conditional writes to prevent replacement. Submission verifies sizes and records S3 version IDs.
-- Submitted data remains until deletion. Abandoned uploads expire after 24 hours. Deletion sweeps S3 immediately on the next controller cycle and again after 20 minutes to cover outstanding upload URLs. Previously issued result URLs can remain usable until their five-minute expiry or object deletion.
+Limits remain 25 MiB/file, 5 GiB/batch, 50 pages, 12 million pixels/page, 10 MiB extracted text, and 15 minutes/document. Unsupported, encrypted, malformed, empty, and over-limit documents fail individually. Three attempts are allowed for transient failures.
 
-## AWS and verification
+Submitted files remain until deletion. Abandoned uploads expire after 24 hours. Deletion immediately blocks new result access and removes S3 versions/job records after a 20-minute grace period covering outstanding uploads and attempts. Already issued result links may remain usable for up to five minutes.
 
-[Terraform deployment instructions](docs/deployment.md) cover the private data services, HTTPS API, Cognito, Fargate workers, and scheduled Java Lambda controller. No AWS resources are provisioned by tests.
+## Low-idle-cost AWS deployment
+
+The Java API runs on Lambda through AWS Lambda Web Adapter and API Gateway. Java controller/verifier Lambdas coordinate Fargate workers. No RDS, ElastiCache, API Fargate service, ALB, or NAT gateway is required.
+
+Workers target 1 vCPU/4 GB each, zero when idle and at most ten. An explicit demo session keeps one OCR-preloaded worker warm for two hours; expiry removes that minimum without interrupting active work. Workers have public outbound connectivity but no inbound security-group rules.
+
+See [deployment](docs/deployment.md), [operations](docs/operations.md), and [verification evidence](docs/verification.md). Deployment requires external Turso/Upstash credentials and approved AWS/GitHub configuration; repository tests do not deploy AWS resources.
+
+## Verification
 
 ```sh
 mvn verify
@@ -65,8 +45,10 @@ python3 -m unittest discover -s worker/python -p 'test_*.py'
 terraform -chdir=infra init -backend=false
 terraform -chdir=infra fmt -check -recursive
 terraform -chdir=infra validate
+terraform -chdir=infra/bootstrap init -backend=false
+terraform -chdir=infra/bootstrap validate
 ```
 
-Java integration tests require a running container engine and fail rather than silently skip when it is absent. For rootless Podman, set `DOCKER_HOST` to its socket and `TESTCONTAINERS_RYUK_DISABLED=true`; test containers are closed by the test lifecycle.
+Use JDK 21 and Maven 3.9+. Integration tests require a running Docker-compatible engine and fail instead of silently skipping. Rootless Podman users can set `DOCKER_HOST` to its service socket and `TESTCONTAINERS_RYUK_DISABLED=true`.
 
-See [operations and acceptance checks](docs/operations.md), including the CPU OCR benchmark and AWS scaling smoke test. Worker capacity reaches zero; the API, database, Redis, load balancer, and networking remain billable.
+OCR is printed-English extraction, not structured employment inference. The smaller model uses greedy decoding and may misread names, punctuation, and layouts. Benchmark accuracy and memory before enabling the production controller; no real-resume accuracy or completion-time SLA is claimed.

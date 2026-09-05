@@ -106,7 +106,7 @@ paths:
     post:
       operationId: submitJob
       responses:
-        '202': {description: Verified files queued, or current submitted job returned. Response contains jobId and status.}
+        '202': {description: Verification accepted asynchronously, or current submitted job returned. Response contains jobId and status. VERIFYING transitions to QUEUED when every upload is valid, or UPLOADING with document error_code values when correction is needed.}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
   /v1/jobs/{id}/documents:
@@ -163,7 +163,7 @@ components:
   schemas:
     JobStatus:
       type: string
-      enum: [UPLOADING, QUEUED, PROCESSING, SUCCEEDED, PARTIAL_SUCCESS, FAILED, DELETING]
+      enum: [UPLOADING, VERIFYING, QUEUED, PROCESSING, SUCCEEDED, PARTIAL_SUCCESS, FAILED, DELETING]
     Page:
       type: object
       properties:

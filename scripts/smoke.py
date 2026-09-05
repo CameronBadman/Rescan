@@ -5,6 +5,7 @@ Uses the loopback development issuer; production callers should use their own to
 """
 import argparse
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -16,9 +17,10 @@ parser.add_argument("files", nargs="*")
 parser.add_argument("--count", type=int, default=1)
 parser.add_argument("--timeout", type=int, default=300)
 parser.add_argument("--delete", action="store_true")
+parser.add_argument("--check-all", action="store_true", help="Fetch and validate every result, not just the first page's first result")
 args = parser.parse_args()
-token = json.load(urllib.request.urlopen("http://localhost:9000/token"))["access_token"]
-base = "http://localhost:8080/v1/jobs"
+token = os.getenv("RESCAN_ACCESS_TOKEN") or json.load(urllib.request.urlopen("http://localhost:9000/token"))["access_token"]
+base = os.getenv("RESCAN_API_URL", "http://localhost:8080").rstrip("/") + "/v1/jobs"
 
 
 def api(path, method="GET", body=None, headers=None):
@@ -50,14 +52,23 @@ assert api("", "POST", manifest, {"Idempotency-Key": key})["jobId"] == job
 deadline = time.monotonic() + args.timeout
 while time.monotonic() < deadline:
     state = api(f"/{job}")
+    if state["status"] == "UPLOADING":
+        raise AssertionError("Upload verification failed; inspect document error_code values")
     if state["status"] in ("SUCCEEDED", "PARTIAL_SUCCESS", "FAILED"):
         print(json.dumps(state, indent=2), flush=True)
         assert state["status"] == "SUCCEEDED", state
-        documents = api(f"/{job}/documents")["items"]
-        result = api(f"/{job}/documents/{documents[0]['id']}/result")
-        output = json.load(urllib.request.urlopen(result["url"]))
-        assert output["schemaVersion"] == 1 and output["text"].strip()
-        print(json.dumps(output, indent=2), flush=True)
+        document_page = api(f"/{job}/documents")
+        documents = document_page["items"]
+        if args.check_all:
+            while document_page.get("nextCursor"):
+                document_page = api(f"/{job}/documents?after={document_page['nextCursor']}")
+                documents.extend(document_page["items"])
+            assert len(documents) == len(files)
+        for document in documents if args.check_all else documents[:1]:
+            result = api(f"/{job}/documents/{document['id']}/result")
+            output = json.load(urllib.request.urlopen(result["url"]))
+            assert output["schemaVersion"] == 1 and output["text"].strip()
+            print(json.dumps(output, indent=2), flush=True)
         if args.delete:
             assert api(f"/{job}", "DELETE")["status"] == "DELETING"
             try:
