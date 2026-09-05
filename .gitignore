@@ -10,7 +10,6 @@ data/*.db-journal
 .env
 # terraform / opentofu
 infra/**/.terraform/
-infra/**/.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 *.tfvars
