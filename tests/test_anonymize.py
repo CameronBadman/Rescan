@@ -137,13 +137,12 @@ def test_employer_names_are_kept(llm):
 
 @pytest.mark.parametrize(
     "employer",
-    ["Australian Labor Party", "CFMEU", "St Mary's Catholic Church", "Queensland Malayalee Association", "Brisbane Pride Collective"],
+    ["Australian Labor Party", "United Workers Union", "St Mary's Catholic Church", "Queensland Malayalee Association", "Brisbane Pride Collective"],
 )
 def test_politically_charged_employers_are_removed_with_a_reason(llm, employer):
-    from rescan.pipeline.anonymize import anonymize_resume, employer_is_charged
+    from rescan.pipeline.anonymize import anonymize_resume
     from rescan.schemas import Experience, Identity, StructuredResume
 
-    assert employer_is_charged(employer)
     resume = StructuredResume(
         identity=Identity(full_name="Priya Nair"),
         experience=[Experience(title="Coordinator", employer=employer, months=12), Experience(title="Engineer", employer="Canva")],
@@ -153,6 +152,53 @@ def test_politically_charged_employers_are_removed_with_a_reason(llm, employer):
     assert profile.experience[1].employer == "Canva"
     redaction = next(r for r in profile.redactions if r.field == "experience.employer")
     assert employer in redaction.reason and "protected attribute" in redaction.reason
+
+
+def test_the_model_decides_which_employers_are_charged(llm, monkeypatch):
+    from rescan.llm.client import LLMResponse
+    from rescan.pipeline.anonymize import anonymize_resume
+    from rescan.schemas import Experience, Identity, StructuredResume
+
+    def judged(request):
+        return LLMResponse(
+            data={
+                "summary": None, "institution_tiers": [], "region": None, "job_relevant_affiliations": [],
+                "employers_to_remove": [{"employer": "Northside Collective", "reason": "a political campaign group"}],
+                "redactions": [],
+            },
+            model="m", backend="stub", latency_s=0.0,
+        )
+
+    monkeypatch.setattr(llm, "json_call", judged)
+    resume = StructuredResume(
+        identity=Identity(full_name="Priya Nair"),
+        experience=[
+            Experience(title="Organiser", employer="Northside Collective"),
+            Experience(title="Analyst", employer="Mission Australia"),
+        ],
+    )
+    profile = anonymize_resume(resume, llm, candidate_ref="Candidate 1")
+    assert profile.experience[0].employer is None, "the model's judgement is applied"
+    assert profile.experience[1].employer == "Mission Australia", "no keyword list second-guesses the model"
+    redaction = next(r for r in profile.redactions if r.field == "experience.employer")
+    assert "political campaign group" in redaction.reason
+
+
+def test_model_silence_keeps_every_employer(llm, monkeypatch):
+    from rescan.llm.client import LLMResponse
+    from rescan.pipeline.anonymize import anonymize_resume
+    from rescan.schemas import Experience, Identity, StructuredResume
+
+    def silent(request):
+        return LLMResponse(
+            data={"summary": None, "institution_tiers": [], "region": None, "job_relevant_affiliations": [], "redactions": []},
+            model="m", backend="stub", latency_s=0.0,
+        )
+
+    monkeypatch.setattr(llm, "json_call", silent)
+    resume = StructuredResume(identity=Identity(full_name="Priya Nair"), experience=[Experience(title="X", employer="Australian Labor Party")])
+    profile = anonymize_resume(resume, llm, candidate_ref="Candidate 1")
+    assert profile.experience[0].employer == "Australian Labor Party"
 
 
 def test_an_employer_named_after_the_candidate_is_scrubbed_not_dropped(llm):

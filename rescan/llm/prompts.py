@@ -244,7 +244,7 @@ def structure_user_prompt(resume_text: str) -> str:
 ANONYMIZE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "institution_tiers", "region", "job_relevant_affiliations", "redactions"],
+    "required": ["summary", "institution_tiers", "region", "job_relevant_affiliations", "employers_to_remove", "redactions"],
     "properties": {
         "summary": _str_or_null("The candidate summary rewritten with every identity signal removed."),
         "institution_tiers": {
@@ -268,6 +268,26 @@ ANONYMIZE_SCHEMA: dict[str, Any] = {
                 "'IEEE member'. Drop anything signalling ethnicity, religion, "
                 "sex, national origin, disability or political belief."
             ),
+        },
+        "employers_to_remove": {
+            "type": "array",
+            "description": (
+                "Employers whose name itself reveals a protected attribute — a political "
+                "party or campaign, a trade union, a church or religious body, an ethnic or "
+                "national community organisation, an advocacy or identity group. Name each "
+                "exactly as it appears in the profile, with the attribute it reveals. Leave "
+                "empty when no employer does; an ordinary company, agency, charity or "
+                "university employer is never listed."
+            ),
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["employer", "reason"],
+                "properties": {
+                    "employer": {"type": "string", "description": "The employer name verbatim."},
+                    "reason": {"type": "string", "description": "Which protected attribute it reveals, and why."},
+                },
+            },
         },
         "redactions": {
             "type": "array",
@@ -301,8 +321,16 @@ Remove or generalise:
 
 Preserve exactly, because they are job-relevant:
 - Skills, technologies, and the evidence for them.
-- Role titles, employer names, industries, durations and achievements. An
-  employer name is dropped in code only where it reveals a protected attribute.
+- Role titles, employer names, industries, durations and achievements.
+
+Employer names are kept because where someone worked is job-relevant. The one
+exception: list in employers_to_remove any employer whose name itself reveals
+a protected attribute — a political party or campaign, a trade union, a
+church or religious body, an ethnic or national community organisation, an
+advocacy or identity group — with the attribute it reveals. Judge the
+organisation, not the words: "Mission Australia" is a charity and stays;
+"Australian Labor Party" reveals political opinion and goes. When unsure,
+keep it. The removal itself happens in code.
 - Qualification level and field of study.
 - Work rights status — a lawful requirement, not a demographic proxy.
 - Languages, which are a job-relevant capability.

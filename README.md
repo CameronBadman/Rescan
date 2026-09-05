@@ -142,8 +142,10 @@ and the alternative to write instead —
 questions are scanned against the risky-phrase table too. Employer names are
 *not* forbidden: they stay in the profile and are queryable (`ANY role WHERE
 employer = "…"`); only an employer whose name reveals a protected attribute — a
-party, a union, a religious body, an ethnic or advocacy group — is dropped, with
-the reason recorded. Prestige phrasing in a rule ("leading company") is still
+party, a union, a religious body, an ethnic or advocacy group — is dropped. The
+anonymization model makes that call (it already sees every employer, so it is a
+field in that pass, not an extra one); the code applies it and records the
+reason, and if the model says nothing every employer stays. Prestige phrasing in a rule ("leading company") is still
 flagged for review.
 
 **Every outcome is a sentence.** "Candidate has 3 years of professional

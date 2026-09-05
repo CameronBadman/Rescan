@@ -29,28 +29,6 @@ log = logging.getLogger(__name__)
 
 REDACTED = "[redacted]"
 
-# Employer names stay: where someone worked is capability-relevant context.
-# The only employers removed are those whose name itself reveals a protected
-# attribute — a party, a union, a religious body, an ethnic or national
-# community organisation, an advocacy or identity group.
-CHARGED_EMPLOYER = re.compile(
-    r"\b(labor|labour|liberal|greens?|nationals?|one nation|democrats?|republican|socialist|communist"
-    r"|party|political|campaign|lobby|activis\w*|advocacy"
-    r"|union|cfmeu|actu|unions?\s+nsw|workers'? union"
-    r"|church|mosque|temple|synagogue|diocese|parish|ministr(y|ies)|mission|chaplain\w*"
-    r"|islamic|muslim|christian|catholic|anglican|baptist|jewish|hindu|buddhist|sikh|evangel\w*"
-    r"|lgbt\w*|queer|pride|gay|lesbian"
-    r"|indigenous|aboriginal|torres strait|multicultural|migrant|refugee|ethnic"
-    r"|malayalee|chinese|indian|african|greek|italian|vietnamese|korean|lebanese|arab|filipino"
-    r"|veterans?|rsl|disab\w*|women'?s|men'?s)\b",
-    re.IGNORECASE,
-)
-
-
-def employer_is_charged(employer: str | None) -> bool:
-    return bool(employer) and CHARGED_EMPLOYER.search(employer) is not None
-
-
 # Short tokens are skipped when scrubbing: a two-letter name fragment matches
 # far too much ordinary text to remove safely.
 MIN_SCRUB_TOKEN = 3
@@ -168,6 +146,21 @@ def _anonymized_qualifications(resume: StructuredResume) -> tuple[list[Qualifica
     return qualifications, redactions
 
 
+def charged_employers(data: dict[str, Any]) -> dict[str, str]:
+    """Employers the model judged to reveal a protected attribute, keyed by
+    lower-cased name, with the model's reason. Silence keeps every employer."""
+    charged: dict[str, str] = {}
+    for entry in data.get("employers_to_remove") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("employer") or "").strip()
+        if not name:
+            continue
+        reason = str(entry.get("reason") or "").strip() or "signals a protected attribute."
+        charged[name.lower()] = reason if reason.endswith(".") else reason + "."
+    return charged
+
+
 def anonymize_resume(
     resume: StructuredResume,
     client: LLMClient,
@@ -210,20 +203,22 @@ def anonymize_resume(
     for skill in skills:
         skill.evidence = scrub_text(skill.evidence, tokens)
 
+    # Employer names are kept: where someone worked is capability-relevant
+    # context. The model reviews them and names any whose identity itself
+    # reveals a protected attribute — a party, a union, a religious body, an
+    # ethnic or advocacy organisation. Those are dropped here, with the reason.
+    charged = charged_employers(data)
     experience = [role.model_copy(deep=True) for role in resume.experience]
     for role in experience:
         role.summary = scrub_text(role.summary, tokens)
-        # Employer names are kept. The exception is an employer whose name
-        # reveals a protected attribute — political, religious, ethnic, union,
-        # identity — which is dropped with the reason recorded.
-        if employer_is_charged(role.employer):
+        if role.employer and role.employer.strip().lower() in charged:
             qualification_redactions.append(
                 Redaction(
                     field="experience.employer",
                     action="removed",
                     reason=(
-                        f"Employer {role.employer!r} signals political opinion, religion, ethnicity, "
-                        "union membership or another protected attribute; industry, title and duration are kept."
+                        f"Employer {role.employer!r} removed: {charged[role.employer.strip().lower()]} "
+                        "Industry, title and duration are kept."
                     ),
                 )
             )

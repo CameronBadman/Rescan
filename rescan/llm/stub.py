@@ -603,6 +603,17 @@ def handle_anonymize(request: LLMRequest) -> dict[str, Any]:
     elif identity.get("country"):
         region = identity["country"]
 
+    # The model judges whether an employer's name reveals a protected
+    # attribute; this backend approximates that with the affiliation keywords.
+    employers_to_remove: list[dict[str, str]] = []
+    for role in profile.get("experience", []) or []:
+        employer = (role or {}).get("employer") or ""
+        if employer and PROTECTED_AFFILIATION.search(employer):
+            employers_to_remove.append({
+                "employer": employer,
+                "reason": "the organisation's name reveals political opinion, religion, ethnicity, union membership or another protected attribute",
+            })
+
     kept_affiliations: list[str] = []
     for affiliation in profile.get("affiliations", []) or []:
         if PROTECTED_AFFILIATION.search(affiliation):
@@ -642,6 +653,7 @@ def handle_anonymize(request: LLMRequest) -> dict[str, Any]:
         "institution_tiers": tiers,
         "region": region,
         "job_relevant_affiliations": kept_affiliations,
+        "employers_to_remove": employers_to_remove,
         "redactions": redactions,
     }
 
