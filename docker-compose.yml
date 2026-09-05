@@ -5,11 +5,27 @@ services:
     expose:
       - "9998"
 
+  # An S3-compatible bucket for the resumes. Replace with R2 / AWS by pointing
+  # RESCAN_S3_ENDPOINT_URL and the credentials elsewhere.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${RESCAN_S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${RESCAN_S3_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
   rescan:
     build: .
     restart: unless-stopped
     depends_on:
       - tika
+      - minio
     ports:
       - "8080:8080"
     volumes:
@@ -20,8 +36,16 @@ services:
       RESCAN_LLM_BACKEND: ${RESCAN_LLM_BACKEND:-stub}
       RESCAN_LLM_BASE_URL: ${RESCAN_LLM_BASE_URL:-http://host.docker.internal:8000/v1}
       RESCAN_LLM_MODEL: ${RESCAN_LLM_MODEL:-Qwen/Qwen3.8-27B}
+      # Resumes are pulled from s3://<bucket>/<prefix>/<jobId>/.
+      RESCAN_OBJECT_STORE: s3
+      RESCAN_S3_ENDPOINT_URL: http://minio:9000
+      RESCAN_S3_BUCKET: ${RESCAN_S3_BUCKET:-resumes}
+      RESCAN_S3_ACCESS_KEY_ID: ${RESCAN_S3_ACCESS_KEY_ID:-minioadmin}
+      RESCAN_S3_SECRET_ACCESS_KEY: ${RESCAN_S3_SECRET_ACCESS_KEY:-minioadmin}
+      RESCAN_S3_PREFIX: ${RESCAN_S3_PREFIX:-jobs}
       # Comma-separated. Leaving this empty runs the API unauthenticated.
       RESCAN_API_KEYS: ${RESCAN_API_KEYS:-}
 
 volumes:
   rescan-data:
+  minio-data:

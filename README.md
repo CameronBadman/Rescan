@@ -12,10 +12,14 @@ scores, and writes down why for every candidate.
 ## Pipeline
 
 ```
-bulk upload → dedup → Tika extraction (+OCR fallback) → structuring
-  → anonymization (+leak check) → rule engine (+legal-risk classifier)
-  → triage ranking → ensemble on borderline cases → shortlist + audit trail
-  → human review (identity re-attached)
+recruiter's plan ──► compile (legal brief + reasoning) ──► rules in the query language
+                                                                    │
+bucket <prefix>/<jobId>/ or upload → dedup → Tika extraction (+OCR) → structuring
+  → anonymization (+leak check) → rule engine (REQUIRE clauses) ◄────┘
+  → triage ranking (PREFER clauses) → ensemble on borderline cases
+  → shortlist + audit trail → human review (identity re-attached)
+                                              ▲
+ad-hoc queries in the same language ──────────┘  (POST /jobs/{id}/query)
 ```
 
 Three design commitments run through it:
@@ -71,11 +75,16 @@ then plain JSON mode) and caches whichever the server accepted.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness and configured backend. Public. |
-| `POST` | `/rules/check` | Review screening rules without running a batch. |
+| `POST` | `/rules/compile` | Compile a recruiter's whole plan into rules; returns the model's reasoning with them. |
+| `POST` | `/rules/check` | Review discrete rules, one result per rule in order. |
 | `POST` | `/rules/check-one` | Review a single rule. |
-| `POST` | `/jobs` | Bulk upload (files or zip). Returns a job id immediately. |
+| `GET` | `/dsl/fields` | The language reference: grammar, fields, records, aggregates, forbidden identifiers. |
+| `POST` | `/dsl/parse` | Validate a program or query; a forbidden field is a 422 with its statute. |
+| `POST` | `/jobs` | Bulk upload (files or zip) with a `plan` and/or `rules`. Returns a job id immediately. |
+| `POST` | `/jobs/from-bucket` | Start a job from `<prefix>/<jobId>/` in the object store. |
 | `GET` | `/jobs/{id}/status` | Per-status counts. Poll this for a progress view. |
-| `GET` | `/jobs/{id}/rules` | Classified rule set for the job. |
+| `GET` | `/jobs/{id}/rules` | Compiled rule set, reasoning and source plan for the job. |
+| `POST` | `/jobs/{id}/query` | Run a query over the job's anonymized profiles. |
 | `GET` | `/jobs/{id}/shortlist` | Shortlist, identity re-attached by default. |
 | `GET` | `/jobs/{id}/candidates` | Per-candidate state; identity withheld by default. |
 | `GET` | `/jobs/{id}/audit` | Full decision trail. |
@@ -88,32 +97,97 @@ Identity is re-attached at `/jobs/{id}/shortlist` on purpose. Full anonymization
 is right for the machine passes but backfires for human reviewers, so the people
 doing the interviewing see names again.
 
-## The rule engine
+## The rule language
 
-A recruiter's free-text rule takes one of three paths:
-
-- **applied** — compiles to a structured test and filters candidates;
-- **flagged** — reads as a proxy for a protected attribute, so it is reported
-  with a statute basis and a measurable rewrite, and is *never* compiled into a
-  filter even when it could be;
-- **unmappable** — lawful but not mechanisable, passed to the human reviewer
-  rather than used to exclude anyone.
+Rules are written in a small query language over the anonymized profile. The
+model writes it from the recruiter's plan; the parser validates it; recruiters
+read it in the audit trail. It is also the query base for the resumes — the same
+language runs ad hoc over a processed job.
 
 ```
-$ curl -s localhost:8080/rules/check -H 'content-type: application/json' \
-    -d '{"rules":["Must be a native English speaker"]}' | jq -r '.rules[0].findings[0] | .statutes[0], .suggested_rewrite'
-
-Racial Discrimination Act 1975 (Cth) ss 9, 15 — race, colour, national or ethnic origin
-Communicates in written and spoken English at a professional standard, evidenced in the application.
+REQUIRE years_experience >= 5
+REQUIRE skills HAS ALL ("Python", "SQL") AND skills HAS ANY ("AWS", "GCP", "Azure")
+REQUIRE aqf >= 7 OR years_experience >= 8
+REQUIRE work_rights IS unrestricted
+REQUIRE ANY qualification WHERE field_of_study HAS ANY ("computer science", "engineering") AND aqf >= 7
+REQUIRE COUNT(role WHERE seniority IN ("senior", "lead")) >= 1
+REQUIRE MAX(skill.years WHERE name = "Python") >= 3
+PREFER technologies HAS ANY ("Kafka", "Flink") WEIGHT 2 BECAUSE "Streaming is the core of the role."
+REQUIRE ASK "Has the candidate led an on-call rotation or incident response?"
 ```
 
-Sixteen known risky phrasings are matched deterministically (`rescan/rules/statutes.py`)
-so the advice does not vary between runs; the model catches novel phrasing the
-table misses. **The model can add risk but never remove it.**
+`REQUIRE` clauses screen: a candidate who fails one is excluded, with the reason
+shown. `PREFER` clauses rank: they become the scoring criteria with their
+declared `WEIGHT`, and a match score decomposes into them. The vocabulary is
+large on purpose — seventy-odd named fields (durations, counts, category-filtered
+skill lists, seniority, booleans such as `has_degree`), four record types
+(`skill`, `role`, `qualification`, `project`) quantified with `ANY … WHERE` and
+aggregated with `COUNT/SUM/MAX/MIN/AVG`, and `ASK "…"` for a yes/no question the
+model answers from the profile. `GET /dsl/fields` lists all of it.
 
-Review-level rules — a citizenship requirement, for instance — are lawful with a
-job-based justification, so they are applied but ask for that justification to be
-recorded.
+Four properties hold across the whole language:
+
+**Three-valued.** A value the resume does not state is *unknown*, and unknown
+never fails a candidate on its own: `UNKNOWN AND FALSE` is `FALSE`, `UNKNOWN OR
+TRUE` is `TRUE`, anything else is unknown and goes to manual review. Empty lists
+are unknown, not zero. An aggregate over records that could not be assessed
+reports a range and stays undecided unless the answer is the same either way.
+
+**Proxies cannot enter through a field name.** `region`, `employer`,
+`institution`, `completion_year`, `nationality`, `summary` and forty-odd others
+are *forbidden identifiers*: a rule naming one fails at parse time with the
+statute it engages and the alternative to write instead —
+`'employer' is not queryable: employer prestige is an unvalidated proxy for
+social origin … (Racial Discrimination Act 1975 (Cth) ss 9, 15 …). Instead: ANY
+role WHERE months >= 24`. String literals and `ASK` questions are scanned
+against the risky-phrase table too.
+
+**Every outcome is a sentence.** "Candidate has 3 years of professional
+experience; the rule requires at least 5 years." An `AND` names only the
+conjuncts that failed; an `OR` lists every alternative; `ANY` names the record
+that satisfied it.
+
+**Model checks are accountable.** An `ASK` "no" counts only when the model
+quotes evidence that is actually in the profile; in a `REQUIRE` clause the
+question goes to the ensemble and a split vote is unknown; the model may decline
+when answering would mean inferring a protected attribute. Every check is in the
+audit trail with question, answer, evidence and votes.
+
+### From a plan to rules
+
+`POST /rules/compile` (or `plan` on `POST /jobs`) hands the recruiter's whole
+plan to the model with the legal brief in front of it — the statutes, the
+indirect-discrimination doctrine, every phrasing the deterministic table flags
+with its rewrite — and the language reference. The model reasons first (what
+the role needs, which phrases are proxies and under which Act, how each was
+rewritten, what is hard and what is a preference), then writes one clause per
+requirement. Its reasoning is stored with the rule set.
+
+The model can add risk but never remove it. Seventeen known risky phrasings are
+matched deterministically (`rescan/rules/statutes.py`) over the recruiter's text
+and over every literal in the compiled clause; a rule the table rates high risk
+is reported with a statute and a rewrite and *never* applied, even when it
+compiled cleanly. A clause that does not parse gets one repair round, then goes
+to a human. If inference is down the statute table still runs and nothing is
+applied.
+
+```
+$ curl -s localhost:8080/rules/compile -H 'content-type: application/json' -d '{
+    "plan": "Must have 5+ years experience, Python and SQL, plus AWS or GCP. Bachelor degree or higher.
+             Must be a native English speaker and a recent graduate from a leading company.
+             Nice to have: Terraform. Should have led an on-call rotation."}' \
+  | jq -r '.rules[] | "\(.verdict)\t\(.dsl // ("flagged: " + (.findings|map(.pattern_id)|join(", "))))"'
+
+applicable  REQUIRE years_experience >= 5 AND skills HAS ALL ("Python", "SQL") AND skills HAS ANY ("AWS", "GCP")
+applicable  REQUIRE aqf >= 7
+risky       flagged: native_speaker, recent_graduate, employer_prestige
+applicable  PREFER skills HAS ANY ("Terraform")
+applicable  REQUIRE ASK "Has the candidate led an on-call rotation?"
+```
+
+Review-level rules — a citizenship requirement, or "leading company" — are
+applied where a measurable part exists, with a note to record the job-based
+justification.
 
 Qualification levels are assigned by a deterministic AQF table, never by the
 model, so two candidates holding the same award always get the same level. An
@@ -121,8 +195,41 @@ unrecognised award means "check this by hand", not "reject".
 
 Legal references cover the Racial Discrimination Act 1975, Fair Work Act 2009
 s 351, Sex Discrimination Act 1984, Age Discrimination Act 2004, Disability
-Discrimination Act 1992 and the Anti-Discrimination Act 1991 (Qld). This is
-decision support for recruiters, not legal advice.
+Discrimination Act 1992, the Anti-Discrimination Act 1991 (Qld) and the Privacy
+Act 1988. This is decision support for recruiters, not legal advice.
+
+### Querying a job
+
+```
+$ curl -s localhost:8080/jobs/round-7/query -H 'content-type: application/json' \
+    -d '{"dsl": "years_experience >= 5 AND ANY skill WHERE name = \"Python\""}' | jq '.counts, .matched[0]'
+```
+
+Returns matched, not matched and undecided candidates by reference with a reason
+each, never identity. Queries pass the same legal gate as rules and are written
+to the audit trail, because a query that never formally excludes anyone still
+shapes who gets looked at.
+
+## Where the resumes come from
+
+Resumes for a hiring round live in an S3-compatible bucket under
+`<prefix>/<jobId>/` — MinIO, Cloudflare R2 or AWS all work, through boto3 with
+path-style addressing. `POST /jobs/from-bucket {"job_id": "round-7", "role":
+{...}, "plan": "..."}` pulls that prefix, expands archives, and runs the job
+under the bucket's own job id so the frontend needs no mapping. Non-documents
+(a manifest, a thumbnail) are skipped and reported, not failed.
+
+```bash
+export RESCAN_OBJECT_STORE=s3
+export RESCAN_S3_ENDPOINT_URL=http://minio:9000     # omit for AWS
+export RESCAN_S3_BUCKET=resumes
+export RESCAN_S3_ACCESS_KEY_ID=...
+export RESCAN_S3_SECRET_ACCESS_KEY=...
+export RESCAN_S3_PREFIX=jobs
+```
+
+`RESCAN_OBJECT_STORE=local` (the default) reads the same layout from
+`data/bucket/`, the way the stub stands in for inference.
 
 ## MCP server
 
@@ -134,7 +241,8 @@ python -m rescan.mcp_server           # stdio
 python -m rescan.mcp_server --http    # streamable HTTP
 ```
 
-Tools: `check_screening_rule`, `check_screening_rules`,
+Tools: `compile_hiring_plan`, `check_screening_rule`, `check_screening_rules`,
+`describe_query_language`, `parse_query`, `query_candidates`,
 `list_known_risky_phrases`, `map_qualification_to_aqf`.
 
 ## Bias audit
@@ -159,14 +267,20 @@ report says so rather than presenting a zero gap as a finding.
 
 ## Deployment
 
-`docker-compose.yml` runs the API alongside Tika. Set `RESCAN_API_KEYS` and
-point `RESCAN_LLM_BASE_URL` at the inference host.
+`docker-compose.yml` runs the API alongside Tika and a MinIO bucket. Set
+`RESCAN_API_KEYS` and point `RESCAN_LLM_BASE_URL` at the inference host.
+
+Rule sets stored before the language existed carry a `predicate` key the
+current model ignores; they load with no clause and are not applied. Re-run the
+job to compile its rules.
 
 ## Status
 
 Verified in development:
 
-- 171 tests pass against the deterministic backend.
+- 317 tests pass against the deterministic backend, including the language
+  (parser, three-valued evaluation, aggregates, the judge), plan compilation,
+  queries, and bucket ingestion against moto's S3.
 - Extraction verified end to end through a live Tika 2.9.2 server across txt,
   docx and pdf.
 - Full bulk job verified: 14 documents → 12 processed, 1 duplicate skipped, 1
@@ -179,7 +293,11 @@ Not yet verified:
   pass has been exercised only through the deterministic backend. The prompts,
   guided-decoding schemas and JSON recovery are written but unexercised against
   real generations, and the bias audit has no real result yet. This is the
-  first thing to do once inference is up.
+  first thing to do once inference is up. In particular, how well the model
+  writes the rule language from a free-text plan — and how often the repair
+  round is needed — is unmeasured; the stub compiles by pattern.
+- **No live S3 endpoint.** The boto3 path is exercised against moto only; the
+  local directory store is what ran end to end.
 - **The Docker build and compose stack are unbuilt** — Docker was not available.
 - **OCR is untested end to end**; neither Tesseract nor poppler was installed, so
   the fallback was only verified to degrade correctly (warning recorded, document
