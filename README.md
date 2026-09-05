@@ -318,9 +318,18 @@ job to compile its rules.
 
 Verified in development:
 
-- 317 tests pass against the deterministic backend, including the language
+- 348 tests pass against the deterministic backend, including the language
   (parser, three-valued evaluation, aggregates, the judge), plan compilation,
-  queries, and bucket ingestion against moto's S3.
+  queries, bucket ingestion against moto's S3, and the inference client
+  against scripted servers.
+- **The real inference path was exercised against a real open model** —
+  Qwen3-0.6B on a local llama.cpp server, CPU only. Structured-output
+  negotiation lands on an enforcing style, thinking control is honoured, and
+  structuring, anonymization, the judge and ranking each returned
+  schema-valid JSON. Three defects that run surfaced are fixed: a near-miss
+  enum value no longer fails a resume, a `maxLength` in a schema no longer
+  crashes a grammar-based decoder, and model-written anonymization fields
+  are scrubbed rather than aborting the candidate.
 - Extraction verified end to end through a live Tika 2.9.2 server across txt,
   docx and pdf.
 - Full bulk job verified: 14 documents → 12 processed, 1 duplicate skipped, 1
@@ -329,13 +338,13 @@ Verified in development:
 
 Not yet verified:
 
-- **No run against a real served model.** No GPU was available, so every model
-  pass has been exercised only through the deterministic backend. The prompts,
-  guided-decoding schemas and JSON recovery are written but unexercised against
-  real generations, and the bias audit has no real result yet. This is the
-  first thing to do once inference is up. In particular, how well the model
-  writes the rule language from a free-text plan — and how often the repair
-  round is needed — is unmeasured; the stub compiles by pattern.
+- **No run against Qwen3.8-27B.** No GPU was available. The 0.6B model used
+  to exercise the client is far too small to judge quality: it could not keep
+  the compile pass's reasoning within an 8k-token budget, so **plan
+  compilation has not completed against any real model**, and how well the
+  27B writes the rule language — and how often the repair round fires — is
+  unmeasured. The bias audit has no real result yet. Run
+  `python -m scripts.smoke_real_model` against the served 27B first.
 - **No live S3 endpoint.** The boto3 path is exercised against moto only; the
   local directory store is what ran end to end.
 - **The Docker build and compose stack are unbuilt** — Docker was not available.
