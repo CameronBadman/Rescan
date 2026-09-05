@@ -216,3 +216,27 @@ def test_nullable_enums_use_the_anyof_form():
     assert "anyOf" in skill["proficiency"] and None not in skill["proficiency"]["anyOf"][0]["enum"]
     role = STRUCTURE_SCHEMA["properties"]["experience"]["items"]["properties"]
     assert "anyOf" in role["seniority"] and "anyOf" in role["employment_type"]
+
+
+def test_schemas_avoid_keywords_grammar_decoders_cannot_handle():
+    """llama.cpp's grammar converter and xgrammar expand length bounds and
+    patterns into huge rules (a maxLength of 2000 crashed the server)."""
+    from rescan.llm import prompts
+
+    banned = {"maxLength", "minLength", "pattern", "format", "minimum", "maximum", "multipleOf"}
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in banned:
+                    found.append(f"{path}.{key}")
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                walk(item, f"{path}[{i}]")
+
+    found = []
+    for name in dir(prompts):
+        if name.endswith("_SCHEMA"):
+            walk(getattr(prompts, name), name)
+    assert found == [], found

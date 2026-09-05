@@ -146,6 +146,33 @@ def _anonymized_qualifications(resume: StructuredResume) -> tuple[list[Qualifica
     return qualifications, redactions
 
 
+def _safe_entries(
+    field_name: str, values: Any, tokens: list[str], redactions: list[Redaction]
+) -> list[str]:
+    """Model-written strings, minus any that carry an identity token.
+
+    A tier or region that still names the institution or suburb is not a
+    generalisation, so the entry is removed and the removal recorded rather
+    than scrubbed into "[redacted]".
+    """
+    kept: list[str] = []
+    for value in values or []:
+        text = str(value).strip() if value is not None else ""
+        if not text:
+            continue
+        if scrub_text(text, tokens) != text:
+            redactions.append(
+                Redaction(
+                    field=field_name,
+                    action="removed",
+                    reason=f"The model's {field_name} entry still identified the candidate; removed.",
+                )
+            )
+            continue
+        kept.append(text)
+    return kept
+
+
 def charged_employers(data: dict[str, Any]) -> dict[str, str]:
     """Employers the model judged to reveal a protected attribute, keyed by
     lower-cased name, with the model's reason. Silence keeps every employer."""
@@ -233,6 +260,13 @@ def anonymize_resume(
     redactions = [Redaction(**entry) for entry in data.get("redactions", []) if isinstance(entry, dict)]
     redactions.extend(qualification_redactions)
 
+    # The fields the model writes are scrubbed too, and an entry that would
+    # re-identify the candidate — an institution name where a tier should be,
+    # the suburb where a region should be — is dropped, not passed through.
+    tiers = _safe_entries("institution_tiers", data.get("institution_tiers"), tokens, redactions)
+    affiliations = _safe_entries("job_relevant_affiliations", data.get("job_relevant_affiliations"), tokens, redactions)
+    region = _safe_entries("region", [data.get("region")] if data.get("region") else [], tokens, redactions)
+
     profile = AnonymizedProfile(
         candidate_ref=candidate_ref,
         summary=scrub_text(data.get("summary"), tokens),
@@ -240,11 +274,11 @@ def anonymize_resume(
         experience=experience,
         total_years_experience=resume.total_years_experience,
         qualifications=qualifications,
-        institution_tiers=list(data.get("institution_tiers") or []),
-        region=data.get("region"),
+        institution_tiers=tiers,
+        region=region[0] if region else None,
         work_rights=resume.work_rights.model_copy(deep=True),
         languages=list(resume.languages),
-        job_relevant_affiliations=list(data.get("job_relevant_affiliations") or []),
+        job_relevant_affiliations=affiliations,
         certifications=list(resume.certifications),
         projects=projects,
         licences=list(resume.licences),

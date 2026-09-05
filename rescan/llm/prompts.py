@@ -381,7 +381,6 @@ COMPILE_DSL_SCHEMA: dict[str, Any] = {
                 "statute engaged; (3) how each proxy was rewritten as a measurable capability; "
                 "(4) which requirements are hard (REQUIRE) and which are preferences (PREFER)."
             ),
-            "maxLength": 2000,
         },
         "rules": {
             "type": "array",
@@ -593,9 +592,7 @@ RANK_SCHEMA: dict[str, Any] = {
                     "criterion": {"type": "string"},
                     "score": {
                         "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "How well the candidate meets this criterion.",
+                        "description": "How well the candidate meets this criterion, from 0 to 1. Values outside are clamped.",
                     },
                     "evidence": {
                         "type": "string",

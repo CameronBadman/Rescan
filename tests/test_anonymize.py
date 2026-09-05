@@ -212,3 +212,35 @@ def test_an_employer_named_after_the_candidate_is_scrubbed_not_dropped(llm):
     profile = anonymize_resume(resume, llm, candidate_ref="Candidate 1")
     assert "Nair" not in (profile.experience[0].employer or "")
     assert "Consulting" in profile.experience[0].employer
+
+
+def test_model_written_fields_that_reidentify_are_dropped_not_leaked(llm, monkeypatch):
+    from rescan.llm.client import LLMResponse
+    from rescan.pipeline.anonymize import anonymize_resume
+    from rescan.schemas import Identity, Qualification, StructuredResume
+
+    def leaky(request):
+        return LLMResponse(
+            data={
+                "summary": "Engineer from Sunnybank Hills.",
+                "institution_tiers": ["National Institute of Technology Karnataka, India", "Overseas university"],
+                "region": "Sunnybank Hills, QLD",
+                "job_relevant_affiliations": ["IEEE member"],
+                "employers_to_remove": [],
+                "redactions": [],
+            },
+            model="m", backend="stub", latency_s=0.0,
+        )
+
+    monkeypatch.setattr(llm, "json_call", leaky)
+    resume = StructuredResume(
+        identity=Identity(full_name="Priya Nair", suburb="Sunnybank Hills"),
+        universities=["National Institute of Technology Karnataka"],
+        qualifications=[Qualification(title="B.Tech", institution="National Institute of Technology Karnataka")],
+    )
+    profile = anonymize_resume(resume, llm, candidate_ref="Candidate 1")
+    assert profile.institution_tiers == ["Overseas university"]
+    assert profile.region is None
+    assert profile.job_relevant_affiliations == ["IEEE member"]
+    assert "[redacted]" in (profile.summary or "")
+    assert {r.field for r in profile.redactions if "identified" in r.reason} == {"institution_tiers", "region"}
