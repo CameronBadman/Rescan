@@ -33,6 +33,7 @@ public class WorkerMain {
     private static void process(WorkStore.Claim c,WorkStore work,BlobStore blobs,Queue queue) throws Exception {
         Path temp=Files.createTempDirectory("rescan-document-");
         try(var heartbeat=Executors.newSingleThreadScheduledExecutor()) {
+            TaskProtection.set(true);
             var alive=new AtomicBoolean(true);
             heartbeat.scheduleAtFixedRate(() -> {
                 try { if(!work.heartbeat(c)) { alive.set(false); kill(CHILD.get()); } }
@@ -67,6 +68,7 @@ public class WorkerMain {
             if(terminal) queue.dead(c.id(),"PROCESSING_UNAVAILABLE");
         } finally {
             kill(CHILD.getAndSet(null));
+            try { TaskProtection.set(false); } catch(Exception ignored) { }
             try(var paths=Files.walk(temp)) { for(Path path:paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path); }
         }
     }

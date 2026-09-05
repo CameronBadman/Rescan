@@ -11,6 +11,15 @@ import org.springframework.web.bind.annotation.*;
 public class ResultsController {
     private final JobStore store; private final BlobStore blobs;
     public ResultsController(JobStore store,BlobStore blobs) { this.store=store; this.blobs=blobs; }
+    @DeleteMapping("/{id}") public org.springframework.http.ResponseEntity<?> delete(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID id) {
+        UUID user=store.user(jwt.getSubject()); store.owned(user,id);
+        store.tx.executeWithoutResult(tx -> {
+            store.jdbc.queryForList("SELECT id FROM jobs WHERE id=? AND user_id=? FOR UPDATE",id,user);
+            store.jdbc.update("UPDATE jobs SET status='DELETING',updated_at=now() WHERE id=? AND status<>'DELETING'",id);
+            store.jdbc.update("DELETE FROM outbox WHERE document_id IN (SELECT id FROM documents WHERE job_id=?)",id);
+        });
+        return org.springframework.http.ResponseEntity.accepted().body(Map.of("jobId",id,"status","DELETING"));
+    }
     @GetMapping("/{id}/documents/{documentId}/result") public Map<String,Object> result(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID id,@PathVariable UUID documentId) {
         var job=store.owned(store.user(jwt.getSubject()),id);
         if("DELETING".equals(job.get("status"))) throw new JobStore.MissingJob();
