@@ -696,6 +696,112 @@ def handle_classify_rule(request: LLMRequest) -> dict[str, Any]:
     }
 
 
+
+
+# --------------------------------------------------------------------------
+# Ranking
+# --------------------------------------------------------------------------
+
+
+def _skill_names(profile: dict[str, Any]) -> list[str]:
+    return [str(skill.get("name", "")).lower() for skill in profile.get("skills") or []]
+
+
+def _covers(required: str, held: list[str]) -> bool:
+    needle = required.strip().lower()
+    return bool(needle) and any(needle in name or name in needle for name in held)
+
+
+def _fraction_present(required: list[str], held: list[str]) -> tuple[float, list[str], list[str]]:
+    if not required:
+        return 1.0, [], []
+    matched = [item for item in required if _covers(item, held)]
+    missing = [item for item in required if item not in matched]
+    return len(matched) / len(required), matched, missing
+
+
+def _score_criterion(key: str, profile: dict[str, Any], role: dict[str, Any]) -> tuple[float, str]:
+    held = _skill_names(profile)
+
+    if key == "required_skills":
+        required = role.get("required_skills") or []
+        fraction, matched, missing = _fraction_present(required, held)
+        if not required:
+            return 0.5, "No required skills specified for the role."
+        evidence = f"Holds {len(matched)}/{len(required)} required skills ({', '.join(matched) or 'none'})."
+        if missing:
+            evidence += f" Missing: {', '.join(missing)}."
+        return fraction, evidence
+
+    if key == "desirable_skills":
+        desirable = role.get("desirable_skills") or []
+        fraction, matched, _ = _fraction_present(desirable, held)
+        if not desirable:
+            return 0.5, "No desirable skills specified for the role."
+        return fraction, f"Holds {len(matched)}/{len(desirable)} desirable skills ({', '.join(matched) or 'none'})."
+
+    if key == "experience_depth":
+        years = profile.get("total_years_experience")
+        if years is None:
+            return 0.0, "Years of professional experience not stated in the resume."
+        target = role.get("min_years_experience") or 8.0
+        # Meeting the target scores 0.8; the remainder rewards depth beyond it,
+        # so seniority is not the only thing that ranks.
+        base = min(1.0, float(years) / float(target)) * 0.8
+        surplus = min(0.2, max(0.0, (float(years) - float(target)) / 20.0))
+        return round(min(1.0, base + surplus), 3), f"{years:g} years of professional experience."
+
+    if key == "qualification":
+        level = None
+        for qualification in profile.get("qualifications") or []:
+            if qualification.get("aqf_level") is not None:
+                level = max(level or 0, int(qualification["aqf_level"]))
+        if level is None:
+            return 0.0, "No qualification with a recognised AQF equivalent."
+        target = role.get("min_aqf") or 7
+        return round(min(1.0, level / float(target)), 3), f"Highest qualification is AQF level {level}."
+
+    if key == "role_relevance":
+        title_words = {
+            word for word in re.split(r"\W+", str(role.get("title", "")).lower()) if len(word) > 3
+        }
+        history = " ".join(
+            str(role_entry.get("title") or "") for role_entry in profile.get("experience") or []
+        ).lower()
+        if not title_words or not history.strip():
+            return 0.5, "Insufficient role history to assess relevance."
+        overlap = {word for word in title_words if word in history}
+        return (
+            round(len(overlap) / len(title_words), 3),
+            f"Role history matches {len(overlap)}/{len(title_words)} terms in the role title"
+            + (f" ({', '.join(sorted(overlap))})." if overlap else "."),
+        )
+
+    return 0.5, "Criterion not recognised by this backend; scored neutrally."
+
+
+def handle_rank(request: LLMRequest) -> dict[str, Any]:
+    profile = request.context.get("profile", {})
+    role = request.context.get("role", {})
+    criteria = request.context.get("criteria", [])
+    if not criteria:
+        raise LLMError("rank: no criteria supplied")
+
+    scored = []
+    for criterion in criteria:
+        key = criterion.get("key") if isinstance(criterion, dict) else str(criterion)
+        score, evidence = _score_criterion(key, profile, role)
+        # A deterministic per-candidate jitter would defeat reproducibility, so
+        # ensemble members differ only by the seed applied downstream.
+        scored.append({"criterion": key, "score": score, "evidence": evidence})
+
+    strongest = max(scored, key=lambda entry: entry["score"])
+    weakest = min(scored, key=lambda entry: entry["score"])
+    rationale = f"Strongest on {strongest['criterion']}: {strongest['evidence']} " \
+                f"Weakest on {weakest['criterion']}: {weakest['evidence']}"
+    return {"criteria": scored, "rationale": rationale}
+
+
 # ------------------------------------------------------------------
 # Dispatch
 # ------------------------------------------------------------------
@@ -704,6 +810,7 @@ HANDLERS: dict[str, Callable[[LLMRequest], dict[str, Any]]] = {
     "structure": handle_structure,
     "anonymize": handle_anonymize,
     "classify_rule": handle_classify_rule,
+    "rank": handle_rank,
 }
 
 

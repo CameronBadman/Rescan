@@ -348,3 +348,70 @@ Return JSON only."""
 def classify_rule_user_prompt(rule_text: str, role_context: str | None = None) -> str:
     context = f"\n\nRole context: {role_context}" if role_context else ""
     return f"Review this screening rule.\n\n<rule>\n{rule_text}\n</rule>{context}"
+
+
+# --------------------------------------------------------------------------
+# Pass 4 — triage ranking
+# --------------------------------------------------------------------------
+
+RANK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["criteria", "rationale"],
+    "properties": {
+        "criteria": {
+            "type": "array",
+            "description": "One entry per criterion supplied, in the same order.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["criterion", "score", "evidence"],
+                "properties": {
+                    "criterion": {"type": "string"},
+                    "score": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "How well the candidate meets this criterion.",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "The structured values this score was read from. Never a bare assertion.",
+                    },
+                },
+            },
+        },
+        "rationale": {
+            "type": "string",
+            "description": "Two sentences a reviewer can act on, citing the evidence above.",
+        },
+    },
+}
+
+RANK_SYSTEM = """You score an anonymized candidate against a role, one criterion at a time.
+
+You are given a de-identified profile. It contains no name, no institution name,
+no suburb and no graduation year, by design. Do not speculate about any of them,
+and do not treat their absence as a negative.
+
+Rules:
+- Score each criterion from 0 to 1 on the evidence in the profile alone.
+- Every score must cite the structured values it came from: skills listed, years
+  of experience, AQF level, role history. Never assert a judgement without
+  naming what you read.
+- Absence of evidence is a low score for that criterion, not a penalty applied
+  across the others.
+- Do not reward or penalise work rights status, language background, region, or
+  the tier of an institution. Those are either lawful requirements handled
+  elsewhere or demographic proxies.
+- Career breaks, non-linear histories and overseas experience are not defects.
+
+Return JSON only."""
+
+
+def rank_user_prompt(profile_json: str, role_json: str, criteria_json: str) -> str:
+    return (
+        f"Role:\n{role_json}\n\n"
+        f"Criteria to score:\n{criteria_json}\n\n"
+        f"Anonymized candidate profile:\n{profile_json}"
+    )

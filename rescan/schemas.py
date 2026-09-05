@@ -194,3 +194,58 @@ class AuditEntry(BaseModel):
     stage: str
     event: str
     detail: dict[str, Any] = Field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------
+# Role specification and ranking
+# --------------------------------------------------------------------------
+
+
+class RoleSpec(BaseModel):
+    """What the recruiter is hiring for. Rules are held separately."""
+
+    title: str
+    description: str | None = None
+    required_skills: list[str] = Field(default_factory=list)
+    desirable_skills: list[str] = Field(default_factory=list)
+    min_years_experience: float | None = None
+    min_aqf: int | None = None
+
+
+class CriterionScore(BaseModel):
+    criterion: str
+    score: float = Field(ge=0.0, le=1.0)
+    weight: float = 1.0
+    evidence: str = Field(description="The structured values this score was read from.")
+
+
+class CandidateScore(BaseModel):
+    candidate_ref: str
+    score: float = Field(ge=0.0, le=1.0)
+    criteria: list[CriterionScore] = Field(default_factory=list)
+    rationale: str = ""
+    model: str = "unknown"
+    pass_name: Literal["triage", "ensemble"] = "triage"
+    # Populated only for candidates the ensemble pass re-scored.
+    ensemble_votes: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def weighted_breakdown(self) -> list[tuple[str, float]]:
+        return [(c.criterion, c.score * c.weight) for c in self.criteria]
+
+
+class ShortlistEntry(BaseModel):
+    rank: int
+    candidate_ref: str
+    score: float
+    rationale: str
+    borderline: bool = False
+    criteria: list[CriterionScore] = Field(default_factory=list)
+
+
+class Shortlist(BaseModel):
+    role_title: str
+    entries: list[ShortlistEntry] = Field(default_factory=list)
+    below_cutoff: list[ShortlistEntry] = Field(default_factory=list)
+    excluded: list[dict[str, Any]] = Field(default_factory=list)
+    manual_review: list[dict[str, Any]] = Field(default_factory=list)
