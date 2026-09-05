@@ -7,7 +7,6 @@ import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
 import org.springframework.stereotype.Service;
-import software.amazon.awssdk.services.s3.model.S3Exception;
 
 @Service
 public class BatchService {
@@ -60,8 +59,7 @@ public class BatchService {
         store.tx.execute(
             status -> {
               // Serialize create requests for this owner, including requests with the same key.
-              store.jdbc.queryForObject(
-                  "SELECT id FROM users WHERE id=?", UUID.class, user);
+              store.jdbc.queryForObject("SELECT id FROM users WHERE id=?", UUID.class, user);
               var existing =
                   store.jdbc.queryForList(
                       "SELECT id,manifest_hash FROM jobs WHERE user_id=? AND idempotency_key=?",
@@ -145,14 +143,20 @@ public class BatchService {
   }
 
   public Map<String, Object> submit(UUID user, UUID job) {
-    return store.tx.execute(tx -> {
-      var current=store.owned(user,job);
-      if ("DELETING".equals(current.get("status"))) throw new Errors.Conflict("Job is being deleted");
-      if ("UPLOADING".equals(current.get("status"))) {
-        store.jdbc.update("UPDATE jobs SET status='VERIFYING',verification_generation=verification_generation+1,verification_token=NULL,verification_until=NULL,updated_at=unixepoch() WHERE id=?",job);
-        return Map.of("jobId",job,"status","VERIFYING");
-      }
-      return Map.of("jobId",job,"status",current.get("status"));
-    });
+    return store.tx.execute(
+        tx -> {
+          var current = store.owned(user, job);
+          if ("DELETING".equals(current.get("status")))
+            throw new Errors.Conflict("Job is being deleted");
+          if ("UPLOADING".equals(current.get("status"))) {
+            store.jdbc.update(
+                "UPDATE jobs SET"
+                    + " status='VERIFYING',verification_generation=verification_generation+1,verification_token=NULL,verification_until=NULL,updated_at=unixepoch()"
+                    + " WHERE id=?",
+                job);
+            return Map.of("jobId", job, "status", "VERIFYING");
+          }
+          return Map.of("jobId", job, "status", current.get("status"));
+        });
   }
 }

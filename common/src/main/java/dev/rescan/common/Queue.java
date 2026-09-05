@@ -15,11 +15,15 @@ public class Queue implements AutoCloseable {
   }
 
   private static String redisUrl() {
-    return Secrets.get("REDIS_URL","REDIS_SECRET_ARN");
+    return Secrets.get("REDIS_URL", "REDIS_SECRET_ARN");
   }
 
   public Queue(String url) {
+    var address=java.net.URI.create(url);
+    if(!"rediss".equals(address.getScheme()) && !Set.of("localhost","127.0.0.1","redis").contains(address.getHost()))
+      throw new IllegalArgumentException("Remote Redis requires TLS");
     client = RedisClient.create(url);
+    client.setDefaultTimeout(Duration.ofSeconds(10));
     connection = client.connect();
     try {
       connection
@@ -43,11 +47,21 @@ public class Queue implements AutoCloseable {
   }
 
   public void publishMany(List<UUID> documents) {
-    var futures=new ArrayList<io.lettuce.core.RedisFuture<String>>();
-    for(UUID id:documents) futures.add(connection.async().xadd(STREAM,XAddArgs.Builder.maxlen(100000).approximateTrimming(),Map.of("documentId",id.toString())));
-    for(var future:futures) {
-      try { future.get(10,java.util.concurrent.TimeUnit.SECONDS); }
-      catch(Exception e) { throw new IllegalStateException("Queue publication incomplete",e); }
+    var futures = new ArrayList<io.lettuce.core.RedisFuture<String>>();
+    for (UUID id : documents)
+      futures.add(
+          connection
+              .async()
+              .xadd(
+                  STREAM,
+                  XAddArgs.Builder.maxlen(100000).approximateTrimming(),
+                  Map.of("documentId", id.toString())));
+    for (var future : futures) {
+      try {
+        future.get(10, java.util.concurrent.TimeUnit.SECONDS);
+      } catch (Exception e) {
+        throw new IllegalStateException("Queue publication incomplete", e);
+      }
     }
   }
 

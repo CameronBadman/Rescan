@@ -24,8 +24,7 @@ public class ResultsController {
     store.owned(user, id);
     store.tx.executeWithoutResult(
         tx -> {
-          store.jdbc.queryForList(
-              "SELECT id FROM jobs WHERE id=? AND user_id=?", id, user);
+          store.jdbc.queryForList("SELECT id FROM jobs WHERE id=? AND user_id=?", id, user);
           store.jdbc.update(
               "UPDATE jobs SET status='DELETING',updated_at=unixepoch() WHERE id=? AND"
                   + " status<>'DELETING'",

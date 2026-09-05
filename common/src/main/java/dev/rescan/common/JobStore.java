@@ -45,8 +45,10 @@ public class JobStore {
     for (String state :
         List.of("UPLOADING", "QUEUED", "PROCESSING", "RETRY_WAIT", "SUCCEEDED", "FAILED"))
       counts.put(state, 0L);
-    for(var row:jdbc.queryForList("SELECT status,count(*) AS n FROM documents WHERE job_id=? GROUP BY status",job))
-      counts.put((String)row.get("status"),((Number)row.get("n")).longValue());
+    for (var row :
+        jdbc.queryForList(
+            "SELECT status,count(*) AS n FROM documents WHERE job_id=? GROUP BY status", job))
+      counts.put((String) row.get("status"), ((Number) row.get("n")).longValue());
     result.put("counts", counts);
     result.put(
         "uploaded",

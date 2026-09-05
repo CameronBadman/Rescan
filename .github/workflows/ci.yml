@@ -29,3 +29,16 @@ jobs:
       - run: terraform -chdir=infra fmt -check -recursive
       - run: terraform -chdir=infra init -backend=false
       - run: terraform -chdir=infra validate
+      - run: terraform -chdir=infra/bootstrap init -backend=false
+      - run: terraform -chdir=infra/bootstrap validate
+  staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build
+      - run: docker compose up -d
+      - run: timeout 180 bash -c 'until curl -fsS http://localhost:8080/actuator/health; do sleep 3; done'
+      - run: python3 scripts/smoke.py --timeout 600 --delete
+      - if: always()
+        run: docker compose down -v

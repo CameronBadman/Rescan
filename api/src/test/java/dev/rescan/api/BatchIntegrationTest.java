@@ -7,21 +7,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.rescan.common.*;
 import java.util.*;
 import org.junit.jupiter.api.*;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.*;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.*;
-import org.testcontainers.utility.DockerImageName;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 
 @Testcontainers
 class BatchIntegrationTest {
   @Container
-  static final PostgreSQLContainer<?> DB =
-      new PostgreSQLContainer<>(
-          DockerImageName.parse("docker.io/library/postgres:17.6")
-              .asCompatibleSubstituteFor("postgres"));
+  static final GenericContainer<?> DB =
+      new GenericContainer<>(
+              "ghcr.io/tursodatabase/libsql-server@sha256:134f3a465ade779e417b258d8e4fbfa8ca0a3212a2dbe83457b2fa104b75d54a")
+          .withEnv("SQLD_HTTP_LISTEN_ADDR", "0.0.0.0:8080")
+          .withExposedPorts(8080);
 
   JobStore store;
   BatchService batches;
@@ -30,12 +27,12 @@ class BatchIntegrationTest {
 
   @BeforeEach
   void setup() {
-    var ds = new DriverManagerDataSource(DB.getJdbcUrl(), DB.getUsername(), DB.getPassword());
-    Infrastructure.migrate(ds);
-    store =
-        new JobStore(
-            new JdbcTemplate(ds), new TransactionTemplate(new DataSourceTransactionManager(ds)));
-    store.jdbc.update("TRUNCATE users,jobs,documents,outbox,processing_attempts CASCADE");
+    var db = new TursoDb("http://" + DB.getHost() + ":" + DB.getMappedPort(8080), () -> "");
+    db.migrate();
+    store = new JobStore(db);
+    store.jdbc.update("DELETE FROM jobs");
+    store.jdbc.update("DELETE FROM users");
+    store.jdbc.update("DELETE FROM orphan_results");
     user = store.user("owner");
     blobs = mock(BlobStore.class);
     when(blobs.upload(any(), anyString(), anyLong()))
@@ -57,7 +54,9 @@ class BatchIntegrationTest {
     UUID job = (UUID) response.get("jobId");
     assertEquals(job, batches.create(user, "batch-1", files).get("jobId"));
     assertEquals(4000, store.jdbc.queryForObject("SELECT count(*) FROM documents", Integer.class));
-    assertEquals("QUEUED", batches.submit(user, job).get("status"));
+    assertEquals("VERIFYING", batches.submit(user, job).get("status"));
+    for (int i = 0; i < 40; i++) new Verification(store, blobs).chunk(job);
+    assertEquals("QUEUED", store.owned(user, job).get("status"));
     batches.submit(user, job);
     assertEquals(4000, store.jdbc.queryForObject("SELECT count(*) FROM outbox", Integer.class));
     UUID cursor = UUID.fromString(JobsController.START);
@@ -98,8 +97,44 @@ class BatchIntegrationTest {
                 .get("jobId");
     when(blobs.head(anyString()))
         .thenReturn(HeadObjectResponse.builder().contentLength(99L).versionId("v1").build());
-    assertThrows(Errors.Conflict.class, () -> batches.submit(user, job));
+    assertEquals("VERIFYING", batches.submit(user, job).get("status"));
+    new Verification(store, blobs).chunk(job);
     assertEquals(0, store.jdbc.queryForObject("SELECT count(*) FROM outbox", Integer.class));
     assertEquals("UPLOADING", store.owned(user, job).get("status"));
+    assertEquals(
+        "INVALID_UPLOAD",
+        store
+            .documents(user, job, UUID.fromString(JobsController.START), 100)
+            .getFirst()
+            .get("error_code"));
+    when(blobs.head(anyString()))
+        .thenReturn(
+            HeadObjectResponse.builder().contentLength(100L).versionId("fixed-version").build());
+    batches.submit(user, job);
+    new Verification(store, blobs).chunk(job);
+    assertEquals("QUEUED", store.owned(user, job).get("status"));
+    assertEquals(1, store.jdbc.queryForObject("SELECT count(*) FROM outbox", Integer.class));
+  }
+
+  @Test
+  void deletingDuringVerificationDoesNotQueue() throws Exception {
+    UUID job =
+        (UUID)
+            batches
+                .create(
+                    user,
+                    "delete-verification",
+                    new BatchService.Manifest(List.of(new BatchService.FileSpec("one.txt", 100))))
+                .get("jobId");
+    batches.submit(user, job);
+    when(blobs.head(anyString()))
+        .thenAnswer(
+            call -> {
+              store.jdbc.update("UPDATE jobs SET status='DELETING' WHERE id=?", job);
+              return HeadObjectResponse.builder().contentLength(100L).versionId("v1").build();
+            });
+    new Verification(store, blobs).chunk(job);
+    assertEquals("DELETING", store.owned(user, job).get("status"));
+    assertEquals(0, store.jdbc.queryForObject("SELECT count(*) FROM outbox", Integer.class));
   }
 }

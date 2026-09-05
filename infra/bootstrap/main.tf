@@ -108,13 +108,18 @@ resource "aws_iam_role_policy" "state" {
     { Effect = "Allow", Action = ["s3:GetObject"], Resource = "${aws_s3_bucket.artifacts.arn}/*" }
     ], each.key == "apply" ? [
     { Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.state.arn}/production/terraform.tfstate" },
-    { Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = "arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:${var.name}-controller" },
-    { Effect = "Allow", Action = ["iam:PassRole"], Resource = [for n in ["api", "worker", "controller", "verifier", "execution"] : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.name}-${n}"], Condition = { StringEquals = { "iam:PassedToService" = ["lambda.amazonaws.com", "ecs-tasks.amazonaws.com"] } } }
-  ] : [{ Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.artifacts.arn}/plans/*" }]) })
+    { Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = "arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:${var.name}-controller" }
+  ] : [], each.key == "plan" ? [{ Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.artifacts.arn}/plans/*" }] : []) })
 }
 resource "aws_iam_role_policy" "demo" {
   role   = aws_iam_role.github["demo"].id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = "arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:${var.name}-controller" }] })
+}
+resource "aws_iam_role_policy" "pass_roles" {
+  role = aws_iam_role.github["apply"].id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [
+    { Effect = "Allow", Action = ["iam:PassRole"], Resource = [for n in ["api", "worker", "controller", "verifier", "execution"] : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.name}-${n}"], Condition = { StringEquals = { "iam:PassedToService" = ["lambda.amazonaws.com", "ecs-tasks.amazonaws.com"] } } }
+  ] })
 }
 output "state_bucket" { value = aws_s3_bucket.state.id }
 output "artifact_bucket" { value = aws_s3_bucket.artifacts.id }

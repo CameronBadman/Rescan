@@ -22,7 +22,14 @@ class ScalingTest {
 
   @Test
   void waitsForIdleWindow() {
-    assertEquals(-1, Controller.desired(0, 299));
-    assertEquals(0, Controller.desired(0, 300));
+    assertEquals(-1, Controller.desired(0, 59));
+    assertEquals(0, Controller.desired(0, 60));
+  }
+
+  @Test
+  void warmSessionOnlyChangesMinimum() {
+    assertEquals(1, Controller.desired(0, 600, true));
+    assertEquals(10, Controller.desired(4000, 600, true));
+    assertEquals(0, Controller.desired(0, 600, false));
   }
 }

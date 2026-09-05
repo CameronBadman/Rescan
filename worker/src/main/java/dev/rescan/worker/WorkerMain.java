@@ -32,8 +32,10 @@ public class WorkerMain {
         var blobs = new BlobStore();
         var queue = new Queue()) {
       var work = new WorkStore(context.getBean(JobStore.class));
-      vision=service;
-      if(Boolean.parseBoolean(Settings.get("OCR_PRELOAD","true"))) vision.ensure();
+      vision = service;
+      if (Boolean.parseBoolean(Settings.get("OCR_PRELOAD", "true"))) vision.ensure();
+      Files.writeString(Path.of("/tmp/rescan-worker-ready"),"ready");
+      LOG.log(System.Logger.Level.INFO,"Worker ready; OCR preload complete");
       String consumer = UUID.randomUUID().toString();
       while (RUNNING.get()) {
         try {
@@ -65,10 +67,12 @@ public class WorkerMain {
               if (!work.heartbeat(c)) {
                 alive.set(false);
                 kill(CHILD.get());
+                vision.stop();
               }
             } catch (Exception e) {
               alive.set(false);
               kill(CHILD.get());
+              try { vision.stop(); } catch(java.io.IOException ignored) { }
             }
           },
           20,
@@ -112,9 +116,9 @@ public class WorkerMain {
       env.putAll(kept);
       env.put("HF_HUB_OFFLINE", "1");
       env.put("TRANSFORMERS_OFFLINE", "1");
-      if(Boolean.parseBoolean(Settings.get("OCR_PRELOAD","true"))) {
+      if (Boolean.parseBoolean(Settings.get("OCR_PRELOAD", "true"))) {
         vision.ensure();
-        env.put("VIT_SOCKET",vision.socket.toString());
+        env.put("VIT_SOCKET", vision.socket.toString());
       }
       builder
           .redirectOutput(ProcessBuilder.Redirect.DISCARD)

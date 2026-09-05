@@ -4,68 +4,17 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.util.*;
 import org.junit.jupiter.api.*;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.*;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.*;
 
 @Testcontainers
 class WorkStoreTest {
-  @Test
-  void managedConnectionsReadRotatedCredentials() throws Exception {
-    store.jdbc.execute("CREATE ROLE rescan_rotation LOGIN PASSWORD 'first-test-password'");
-    var secrets =
-        org.mockito.Mockito.mock(
-            software.amazon.awssdk.services.secretsmanager.SecretsManagerClient.class);
-    try (var factory =
-        org.mockito.Mockito.mockStatic(
-            software.amazon.awssdk.services.secretsmanager.SecretsManagerClient.class)) {
-      factory
-          .when(software.amazon.awssdk.services.secretsmanager.SecretsManagerClient::create)
-          .thenReturn(secrets);
-      org.mockito.Mockito.when(
-              secrets.getSecretValue(
-                  org.mockito.ArgumentMatchers
-                      .<java.util.function.Consumer<
-                              software.amazon.awssdk.services.secretsmanager.model
-                                  .GetSecretValueRequest.Builder>>
-                          any()))
-          .thenReturn(
-              software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse.builder()
-                  .secretString(
-                      "{\"username\":\"rescan_rotation\",\"password\":\"first-test-password\"}")
-                  .build());
-      var source =
-          new ManagedSecretDataSource(
-              DB.getJdbcUrl(), "test-secret", new com.fasterxml.jackson.databind.ObjectMapper());
-      try (var connection = source.getConnection()) {
-        assertTrue(connection.isValid(1));
-      }
-      store.jdbc.execute("ALTER ROLE rescan_rotation PASSWORD 'second-test-password'");
-      org.mockito.Mockito.when(
-              secrets.getSecretValue(
-                  org.mockito.ArgumentMatchers
-                      .<java.util.function.Consumer<
-                              software.amazon.awssdk.services.secretsmanager.model
-                                  .GetSecretValueRequest.Builder>>
-                          any()))
-          .thenReturn(
-              software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse.builder()
-                  .secretString(
-                      "{\"username\":\"rescan_rotation\",\"password\":\"second-test-password\"}")
-                  .build());
-      try (var connection = source.getConnection()) {
-        assertTrue(connection.isValid(1));
-      }
-    }
-  }
-
   @Container
-  static final PostgreSQLContainer<?> DB =
-      new PostgreSQLContainer<>(
-          org.testcontainers.utility.DockerImageName.parse("docker.io/library/postgres:17.6")
-              .asCompatibleSubstituteFor("postgres"));
+  static final GenericContainer<?> DB =
+      new GenericContainer<>(
+              "ghcr.io/tursodatabase/libsql-server@sha256:134f3a465ade779e417b258d8e4fbfa8ca0a3212a2dbe83457b2fa104b75d54a")
+          .withEnv("SQLD_HTTP_LISTEN_ADDR", "0.0.0.0:8080")
+          .withExposedPorts(8080);
 
   JobStore store;
   WorkStore work;
@@ -73,13 +22,13 @@ class WorkStoreTest {
 
   @BeforeEach
   void setup() {
-    var ds = new DriverManagerDataSource(DB.getJdbcUrl(), DB.getUsername(), DB.getPassword());
-    Infrastructure.migrate(ds);
-    store =
-        new JobStore(
-            new JdbcTemplate(ds), new TransactionTemplate(new DataSourceTransactionManager(ds)));
+    var db = new TursoDb("http://" + DB.getHost() + ":" + DB.getMappedPort(8080), () -> "");
+    db.migrate();
+    store = new JobStore(db);
+    store.jdbc.update("DELETE FROM jobs");
+    store.jdbc.update("DELETE FROM users");
+    store.jdbc.update("DELETE FROM orphan_results");
     work = new WorkStore(store);
-    store.jdbc.update("TRUNCATE users,jobs,documents,outbox,processing_attempts CASCADE");
     user = store.user("test-owner");
     job = UUID.randomUUID();
     doc = UUID.randomUUID();
@@ -110,7 +59,7 @@ class WorkStoreTest {
   @Test
   void expiredLeaseIsRecoveredAndOldWorkerFenced() {
     var old = work.claim(doc);
-    store.jdbc.update("UPDATE documents SET lease_until=now()-interval '1 second' WHERE id=?", doc);
+    store.jdbc.update("UPDATE documents SET lease_until=unixepoch()-1 WHERE id=?", doc);
     work.recover();
     var current = work.claim(doc);
     assertNotNull(current);
@@ -134,7 +83,7 @@ class WorkStoreTest {
       var claim = work.claim(doc);
       assertEquals(attempt, claim.attempt());
       assertEquals(attempt == 3, work.fail(claim, "TEMPORARY", true));
-      store.jdbc.update("UPDATE documents SET available_at=now() WHERE id=?", doc);
+      store.jdbc.update("UPDATE documents SET available_at=unixepoch() WHERE id=?", doc);
     }
     assertNull(work.claim(doc));
     assertEquals("FAILED", store.detail(user, job).get("status"));
@@ -160,5 +109,66 @@ class WorkStoreTest {
   @Test
   void deniesDifferentOwner() {
     assertThrows(JobStore.MissingJob.class, () -> store.detail(store.user("other"), job));
+  }
+
+  @Test
+  void tenConcurrentConsumersHaveOnlyOneWinner() throws Exception {
+    try (var pool = java.util.concurrent.Executors.newFixedThreadPool(10)) {
+      var start = new java.util.concurrent.CountDownLatch(1);
+      var futures = new ArrayList<java.util.concurrent.Future<WorkStore.Claim>>();
+      for (int i = 0; i < 10; i++)
+        futures.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  return work.claim(doc);
+                }));
+      start.countDown();
+      int winners = 0;
+      for (var future : futures) if (future.get() != null) winners++;
+      assertEquals(1, winners);
+      assertEquals(
+          1,
+          store.jdbc.queryForObject(
+              "SELECT attempts FROM documents WHERE id=?", Integer.class, doc));
+    }
+  }
+
+  @Test
+  void deletionDuringS3UploadCannotPublish() {
+    var claim = work.claim(doc);
+    assertFalse(
+        work.complete(
+            claim,
+            "orphan-key",
+            () -> store.jdbc.update("UPDATE jobs SET status='DELETING' WHERE id=?", job)));
+    assertEquals(
+        1, store.jdbc.queryForObject("SELECT count(*) FROM orphan_results", Integer.class));
+    assertNull(
+        store.jdbc.queryForObject(
+            "SELECT result_key FROM documents WHERE id=?", String.class, doc));
+  }
+
+  @Test
+  void rollbackAndMigrationChecksumsAreEnforced() {
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            store.tx.executeWithoutResult(
+                tx -> {
+                  store.jdbc.update("UPDATE jobs SET status='FAILED' WHERE id=?", job);
+                  throw new IllegalStateException("synthetic failure");
+                }));
+    assertEquals("QUEUED", store.owned(user, job).get("status"));
+    store.jdbc.migrate();
+    String checksum =
+        store.jdbc.queryForObject(
+            "SELECT checksum FROM schema_migrations WHERE version=1", String.class);
+    try {
+      store.jdbc.update("UPDATE schema_migrations SET checksum='invalid'");
+      assertThrows(IllegalStateException.class, () -> store.jdbc.migrate());
+    } finally {
+      store.jdbc.update("UPDATE schema_migrations SET checksum=?", checksum);
+    }
   }
 }

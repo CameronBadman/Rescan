@@ -26,13 +26,18 @@ jobs:
         with: {python-version: '3.10'}
       - run: mvn -B verify
       - run: python -m unittest discover -s worker/python -p 'test_*.py'
-      - uses: docker/setup-buildx-action@v3
       - name: Build staging and run integration checks
         run: |
-          docker compose build
-          docker compose up -d
+          docker build --target api-lambda -t "$ECR_API:$RELEASE_ID" .
+          docker build --target worker -t "$ECR_WORKER:$RELEASE_ID" .
+          docker compose build controller dev-auth
+          export RESCAN_API_IMAGE="$ECR_API:$RELEASE_ID" RESCAN_WORKER_IMAGE="$ECR_WORKER:$RELEASE_ID"
+          docker compose up -d --no-build
           timeout 180 bash -c 'until curl -fsS http://localhost:8080/actuator/health; do sleep 3; done'
           python scripts/smoke.py --timeout 600 --delete
+          CONTAINER=$(docker create rescan-controller:local)
+          docker cp "$CONTAINER:/app/controller.jar" controller/target/controller-0.1.0-SNAPSHOT.jar
+          docker rm "$CONTAINER"
       - name: Stage cleanup
         if: always()
         run: docker compose down -v
@@ -43,10 +48,10 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
       - name: Publish immutable images and release manifest
         run: |
-          docker buildx build --platform linux/amd64 --target api-lambda --provenance=false --push -t "$ECR_API:$RELEASE_ID" --metadata-file /tmp/api-image.json .
-          docker buildx build --platform linux/amd64 --target worker --provenance=false --push -t "$ECR_WORKER:$RELEASE_ID" --metadata-file /tmp/worker-image.json .
-          API_DIGEST=$(jq -r '."containerimage.digest"' /tmp/api-image.json)
-          WORKER_DIGEST=$(jq -r '."containerimage.digest"' /tmp/worker-image.json)
+          docker push "$ECR_API:$RELEASE_ID"
+          docker push "$ECR_WORKER:$RELEASE_ID"
+          API_DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$ECR_API:$RELEASE_ID" | cut -d '@' -f2)
+          WORKER_DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$ECR_WORKER:$RELEASE_ID" | cut -d '@' -f2)
           JAR_SHA=$(sha256sum controller/target/controller-0.1.0-SNAPSHOT.jar | cut -d ' ' -f1)
           jq -n --arg commit "$GITHUB_SHA" --arg release "$RELEASE_ID" --arg api "$ECR_API@$API_DIGEST" --arg worker "$ECR_WORKER@$WORKER_DIGEST" --arg jar "$JAR_SHA" '{commit:$commit,release:$release,api_image:$api,worker_image:$worker,controller_sha256:$jar}' > /tmp/release.json
           aws s3 cp controller/target/controller-0.1.0-SNAPSHOT.jar "s3://$ARTIFACT_BUCKET/releases/$RELEASE_ID/controller.jar" --sse AES256

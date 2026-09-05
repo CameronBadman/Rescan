@@ -17,6 +17,7 @@ services:
     image: ghcr.io/tursodatabase/libsql-server@sha256:134f3a465ade779e417b258d8e4fbfa8ca0a3212a2dbe83457b2fa104b75d54a
     environment:
       SQLD_HTTP_LISTEN_ADDR: 0.0.0.0:8080
+      SQLD_DB_PATH: /var/lib/sqld/iku.db
     ports: ["127.0.0.1:8081:8080"]
     volumes: ["libsql-data:/var/lib/sqld"]
   redis:
@@ -49,16 +50,19 @@ services:
         aws --endpoint-url http://s3:4566 s3api put-bucket-versioning --bucket rescan-local --versioning-configuration Status=Enabled
         aws --endpoint-url http://s3:4566 s3api put-bucket-cors --bucket rescan-local --cors-configuration '{"CORSRules":[{"AllowedOrigins":["http://localhost:5173"],"AllowedMethods":["PUT","GET","HEAD"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag","x-amz-version-id"]}]}'
   migrate:
+    image: rescan-controller:local
     build: {context: ., target: controller}
     environment: *environment
     depends_on: [libsql]
     command: ["--migrate"]
     restart: on-failure
   dev-auth:
+    image: rescan-dev-auth:local
     build: {context: ., target: dev-auth}
     environment: {DEV_AUTH_BIND: 0.0.0.0}
     ports: ["127.0.0.1:9000:9000"]
   api:
+    image: ${RESCAN_API_IMAGE:-rescan-api:local}
     build: {context: ., target: api}
     environment: *environment
     ports: ["127.0.0.1:8080:8080"]
@@ -71,12 +75,14 @@ services:
       interval: 5s
       retries: 30
   controller:
+    image: rescan-controller:local
     build: {context: ., target: controller}
     environment: *environment
     depends_on:
       api: {condition: service_healthy}
       redis: {condition: service_healthy}
   worker:
+    image: ${RESCAN_WORKER_IMAGE:-rescan-worker:local}
     build: {context: ., target: worker}
     environment:
       <<: *environment

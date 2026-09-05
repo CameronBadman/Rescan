@@ -47,6 +47,7 @@ jobs:
       source: ${{ steps.manifest.outputs.source }}
     steps:
       - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
       - uses: hashicorp/setup-terraform@v3
         with: {terraform_version: 1.12.2, terraform_wrapper: false}
       - uses: aws-actions/configure-aws-credentials@v4
@@ -60,8 +61,8 @@ jobs:
           aws s3 cp "s3://$ARTIFACT_BUCKET/releases/$RELEASE_ID/manifest.json" /tmp/release.json
           SOURCE=$(jq -r .commit /tmp/release.json)
           [[ "$SOURCE" =~ ^[a-f0-9]{40}$ ]]
-          test "$SOURCE" = "$GITHUB_SHA"
-          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          git merge-base --is-ancestor "$SOURCE" "$GITHUB_SHA"
+          echo "source=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - name: Prepare Terraform inputs
         run: bash scripts/prepare-release.sh
       - name: Plan without exposing sensitive values in logs
