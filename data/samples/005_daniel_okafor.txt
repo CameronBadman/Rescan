@@ -1,0 +1,24 @@
+DANIEL OKAFOR
+d.okafor@email.com | 0407 332 918 | Ipswich, QLD
+
+PROFILE
+Platform engineer, 7 years. Australian permanent resident.
+
+EXPERIENCE
+Platform Engineer — Domain Group, remote | Aug 2022 – Present
+- Kubernetes platform for 30 product teams, Terraform and ArgoCD
+- Cut CI pipeline time by 60%
+
+DevOps Engineer — Andela / client engagements, Lagos, Nigeria | 2018 – 2022
+- AWS infrastructure for fintech clients across three continents
+
+EDUCATION
+Bachelor of Science in Computer Engineering
+University of Lagos, Nigeria, 2017
+
+CERTIFICATIONS
+Certified Kubernetes Administrator (CKA)
+AWS Solutions Architect Professional
+
+SKILLS
+Kubernetes, Terraform, AWS, Go, Python, ArgoCD, Prometheus

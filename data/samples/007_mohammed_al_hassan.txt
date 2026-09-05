@@ -1,0 +1,27 @@
+MOHAMMED AL-HASSAN
+m.alhassan@email.com | 0422 887 100 | Springfield Lakes, QLD
+
+PROFILE
+Senior software engineer, 9 years. Australian citizen since 2021.
+Arrived in Australia 2016 on humanitarian visa.
+
+EXPERIENCE
+Senior Engineer — NAB, Brisbane | 2020 – Present
+- Core banking API modernisation, Java and Spring Boot
+- Led a team of 5
+
+Software Engineer — Telstra, Melbourne | 2017 – 2020
+- Network provisioning systems
+
+Software Engineer — Syrian Telecom, Damascus | 2015 – 2016
+
+EDUCATION
+Bachelor of Engineering in Computer Systems
+University of Damascus, Syria, 2014
+Master of Information Technology, Swinburne University, 2019
+
+SKILLS
+Java, Spring Boot, Python, Oracle, Kafka, Azure
+
+LANGUAGES
+Arabic (native), English (fluent)

@@ -1,0 +1,26 @@
+WEI ZHANG
+wei.zhang.dev@email.com | 0455 090 771 | Chatswood, NSW
+
+PROFILE
+Distributed systems engineer, 8 years. Currently on subclass 482 visa,
+seeking employer sponsorship transfer.
+
+WORK HISTORY
+Staff Engineer — Canva, Sydney | Jun 2021 – Present
+- Designed the media processing pipeline, 40M assets/day
+- Mentored 6 engineers, led the platform guild
+
+Senior Engineer — Alibaba Cloud, Hangzhou, China | 2017 – 2021
+- Object storage control plane in Go and C++
+
+Engineer — Huawei, Shenzhen | 2015 – 2017
+
+EDUCATION
+Master of Computer Science, Tsinghua University, China, 2015
+Bachelor of Software Engineering, Zhejiang University, China, 2013
+
+SKILLS
+Go, C++, Rust, Kubernetes, Envoy, Postgres, Redis, Terraform
+
+LANGUAGES
+Mandarin (native), English (professional)

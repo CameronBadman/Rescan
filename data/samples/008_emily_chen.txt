@@ -1,0 +1,17 @@
+EMILY CHEN
+emily.chen@email.com | 0466 554 019 | Carindale, QLD
+
+SUMMARY
+Full-stack engineer, 3 years. Australian citizen, born in Brisbane.
+
+EXPERIENCE
+Software Engineer — Xero, Brisbane | Mar 2023 – Present
+- Payroll compliance features, C# and React
+
+Associate Engineer — Technology One, Brisbane | Feb 2022 – Feb 2023
+
+EDUCATION
+Bachelor of Engineering (Software), Queensland University of Technology, 2021
+
+SKILLS
+C#, .NET, React, TypeScript, Azure, SQL Server

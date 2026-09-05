@@ -1,0 +1,26 @@
+JAMES THOMPSON
+j.thompson@email.com | 0403 118 220 | New Farm, QLD
+github.com/jthompson
+
+SUMMARY
+Software engineer, 5 years experience in distributed systems. Australian citizen.
+
+EMPLOYMENT
+Backend Developer — Atlassian, Brisbane
+Feb 2021 – Present
+- Jira Cloud platform services in Java and Kotlin
+- Owned the notification fan-out service, 200M events/day
+
+Graduate Developer — Suncorp, Brisbane
+Jan 2020 – Jan 2021
+- Internal tooling in Python, claims workflow automation
+
+EDUCATION
+Bachelor of Engineering (Software) with Honours
+University of Queensland, 2019
+
+SKILLS
+Java, Kotlin, Python, AWS, DynamoDB, Kafka, Docker
+
+INTERESTS
+Brisbane Cricket Club, rock climbing

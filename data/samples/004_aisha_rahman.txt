@@ -1,0 +1,25 @@
+AISHA RAHMAN
+aisha.rahman@email.com | 0431 776 542 | Logan Central, QLD
+
+SUMMARY
+Data engineer with 4 years experience. Australian citizen. Returned to work in
+2024 after a two-year career break for caring responsibilities.
+
+EXPERIENCE
+Data Engineer — Queensland Health, Brisbane | Mar 2024 – Present
+- Built the clinical data warehouse ingestion in Python and dbt
+- Managed PII handling under the Queensland Health information standards
+
+Data Analyst — Woolworths Group, Brisbane | Feb 2020 – Jan 2022
+- Demand forecasting models, SQL and Python
+
+EDUCATION
+Bachelor of Information Technology
+Griffith University, 2019
+Graduate Certificate in Data Science, Griffith University, 2023
+
+SKILLS
+Python, SQL, dbt, Airflow, Snowflake, Pandas, Tableau
+
+AFFILIATIONS
+Islamic Women's Association of Australia (volunteer)

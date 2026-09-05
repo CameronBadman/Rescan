@@ -1,0 +1,18 @@
+ROBERT HUGHES
+rob.hughes@email.com | 0418 663 442 | Redcliffe, QLD
+
+PROFILE
+Software engineer with 22 years experience across defence and telco.
+Australian citizen. NV1 security clearance.
+
+EXPERIENCE
+Principal Engineer — Boeing Defence Australia, Brisbane | 2012 – Present
+- Mission systems in C++ and Ada, safety-critical certification
+
+Senior Developer — Ericsson, Brisbane | 2004 – 2012
+
+EDUCATION
+Bachelor of Science (Computer Science), University of Queensland, 2003
+
+SKILLS
+C++, Ada, Python, Linux, real-time systems, DO-178B

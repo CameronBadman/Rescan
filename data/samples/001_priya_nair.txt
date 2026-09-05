@@ -1,0 +1,32 @@
+PRIYA NAIR
+priya.nair@email.com | 0412 555 883 | Sunnybank Hills, QLD, Australia
+linkedin.com/in/priyanair
+
+PROFESSIONAL SUMMARY
+Backend engineer with 6 years building payment and identity systems. Australian
+permanent resident, full unrestricted work rights.
+
+EXPERIENCE
+Senior Backend Engineer — Tyro Payments, Brisbane
+Mar 2022 – Present
+- Led migration of settlement service from monolith to Go microservices
+- Reduced p99 latency from 840ms to 120ms
+- On-call rotation, ran incident reviews
+
+Backend Engineer — Infosys, Bangalore, India
+Jan 2019 – Feb 2022
+- Java/Spring services for a UK retail bank
+- Built reconciliation batch processing over 4M daily transactions
+
+EDUCATION
+Bachelor of Technology in Computer Science
+National Institute of Technology Karnataka, India, 2018
+
+SKILLS
+Go, Java, Python, PostgreSQL, Kafka, Kubernetes, AWS, Terraform, gRPC
+
+LANGUAGES
+English (fluent), Malayalam (native), Hindi (conversational)
+
+AFFILIATIONS
+Queensland Malayalee Association; Women Who Code Brisbane
