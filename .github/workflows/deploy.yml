@@ -65,6 +65,13 @@ jobs:
           echo "source=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - name: Prepare Terraform inputs
         run: bash scripts/prepare-release.sh
+      - name: Require a successful migration before activation
+        if: inputs.activate
+        run: |
+          DB_SHA=$(printf '%s' "$TF_VAR_turso_database_url" | sha256sum | cut -d ' ' -f1)
+          SCHEMA_SHA=$(sha256sum common/src/main/resources/db/turso/V1.sql | cut -d ' ' -f1)
+          aws s3 cp "s3://$ARTIFACT_BUCKET/installations/$TF_VAR_name/$DB_SHA/$SCHEMA_SHA.json" /tmp/migration-marker.json
+          jq -e '.migrated == true' /tmp/migration-marker.json
       - name: Plan without exposing sensitive values in logs
         id: plan
         run: |
@@ -102,4 +109,7 @@ jobs:
           test "$(jq -r '.FunctionError // empty' /tmp/invoke.json)" = ""
           jq -e '.migrated == true' /tmp/migrate.json
           curl --retry 10 --retry-all-errors --retry-delay 3 -fsS "https://$TF_VAR_api_domain/actuator/health"
+          DB_SHA=$(printf '%s' "$TF_VAR_turso_database_url" | sha256sum | cut -d ' ' -f1)
+          SCHEMA_SHA=$(sha256sum common/src/main/resources/db/turso/V1.sql | cut -d ' ' -f1)
+          aws s3 cp /tmp/migrate.json "s3://$ARTIFACT_BUCKET/installations/$TF_VAR_name/$DB_SHA/$SCHEMA_SHA.json" --sse AES256
           echo "Deployment completed. Run authenticated acceptance tests before enabling demo traffic." >> "$GITHUB_STEP_SUMMARY"

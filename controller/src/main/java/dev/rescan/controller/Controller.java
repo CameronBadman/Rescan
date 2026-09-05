@@ -23,6 +23,8 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
     }
     if ("warm".equals(event.get("action"))) {
       boolean enabled = Boolean.TRUE.equals(event.get("enabled"));
+      if (enabled && !Boolean.parseBoolean(Settings.get("PROCESSING_ENABLED", "true")))
+        throw new IllegalStateException("Enable the controller schedule before warming workers");
       store.jdbc.update(
           "UPDATE controller_state SET warm_until=CASE WHEN ? THEN unixepoch()+7200 ELSE NULL END"
               + " WHERE id=1",
@@ -98,6 +100,48 @@ public class Controller implements RequestHandler<Map<String, Object>, Map<Strin
         }
       }
       cleanup(deadline);
+      if (!Settings.get("ECS_CLUSTER", "").isBlank()) {
+        long age =
+            store.jdbc.queryForObject(
+                "SELECT coalesce(max(unixepoch()-d.available_at),0) FROM documents d JOIN jobs j ON"
+                    + " j.id=d.job_id WHERE j.status IN ('QUEUED','PROCESSING') AND d.status IN"
+                    + " ('QUEUED','RETRY_WAIT') AND d.available_at<=unixepoch()",
+                Long.class);
+        long failures =
+            store.jdbc.queryForObject(
+                "SELECT count(*) FROM documents WHERE status='FAILED' AND"
+                    + " updated_at>=unixepoch()-60",
+                Long.class);
+        try {
+          System.out.println(
+              new com.fasterxml.jackson.databind.ObjectMapper()
+                  .writeValueAsString(
+                      Map.of(
+                          "_aws",
+                          Map.of(
+                              "Timestamp",
+                              System.currentTimeMillis(),
+                              "CloudWatchMetrics",
+                              List.of(
+                                  Map.of(
+                                      "Namespace",
+                                      "Rescan",
+                                      "Dimensions",
+                                      List.of(List.of("Cluster")),
+                                      "Metrics",
+                                      List.of(
+                                          Map.of("Name", "QueueAgeSeconds", "Unit", "Seconds"),
+                                          Map.of("Name", "FailedDocuments", "Unit", "Count"))))),
+                          "Cluster",
+                          Settings.require("ECS_CLUSTER"),
+                          "QueueAgeSeconds",
+                          age,
+                          "FailedDocuments",
+                          failures)));
+        } catch (java.io.IOException e) {
+          throw new IllegalStateException("Metric serialization failed", e);
+        }
+      }
       return Map.of("outstanding", outstanding, "desired", count);
     } finally {
       store.jdbc.update(

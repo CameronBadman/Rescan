@@ -10,6 +10,15 @@ import java.util.function.*;
 
 /** SQL-over-HTTP; uncertain writes are never transparently replayed. */
 public class TursoDb {
+  private static final class SqlFailure extends IllegalStateException {
+    final String code;
+
+    SqlFailure(String code) {
+      super("Turso SQL error: " + code);
+      this.code = code;
+    }
+  }
+
   private final URI endpoint;
   private final Supplier<String> token;
   private final ObjectMapper json = new ObjectMapper();
@@ -74,8 +83,7 @@ public class TursoDb {
       }
       for (var r : root.path("results"))
         if ("error".equals(r.path("type").asText()))
-          throw new IllegalStateException(
-              "Turso SQL error: " + r.path("error").path("code").asText("UNKNOWN"));
+          throw new SqlFailure(r.path("error").path("code").asText("UNKNOWN"));
       return root;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -195,7 +203,24 @@ public class TursoDb {
     s.deadline = System.nanoTime() + Duration.ofMillis(4500).toNanos();
     session.set(s);
     try {
-      run("BEGIN IMMEDIATE");
+      for (int attempt = 0; ; attempt++) {
+        s.deadline = System.nanoTime() + Duration.ofMillis(4500).toNanos();
+        try {
+          run("BEGIN IMMEDIATE");
+          break;
+        } catch (SqlFailure failure) {
+          if (attempt >= 2
+              || !(failure.code.startsWith("SQLITE_BUSY")
+                  || failure.code.startsWith("SQLITE_LOCKED"))) throw failure;
+          try {
+            Thread.sleep(100L * (attempt + 1));
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Transaction interrupted", e);
+          }
+        }
+      }
+      s.deadline = System.nanoTime() + Duration.ofMillis(4500).toNanos();
       T value = work.apply(null);
       run("COMMIT");
       return value;

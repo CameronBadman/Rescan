@@ -77,6 +77,15 @@ resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
 }
+resource "aws_ecr_repository_policy" "lambda" {
+  repository = aws_ecr_repository.images["api"].name
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{
+    Sid       = "LambdaImageRetrieval", Effect = "Allow",
+    Principal = { Service = "lambda.amazonaws.com" },
+    Action    = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+    Condition = { ArnLike = { "aws:SourceArn" = "arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:${var.name}-api" } }
+  }] })
+}
 resource "aws_iam_role" "github" {
   for_each           = var.subjects
   name               = "${var.name}-github-${each.key}"
@@ -108,6 +117,7 @@ resource "aws_iam_role_policy" "state" {
     { Effect = "Allow", Action = ["s3:GetObject"], Resource = "${aws_s3_bucket.artifacts.arn}/*" }
     ], each.key == "apply" ? [
     { Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.state.arn}/production/terraform.tfstate" },
+    { Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.artifacts.arn}/installations/${var.name}/*" },
     { Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = "arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:${var.name}-controller" }
   ] : [], each.key == "plan" ? [{ Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.artifacts.arn}/plans/*" }] : []) })
 }

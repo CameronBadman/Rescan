@@ -117,6 +117,29 @@ class BatchIntegrationTest {
   }
 
   @Test
+  void activeVerifierLeaseSkipsExternalCallsAndResumesAfterExpiry() throws Exception {
+    UUID job =
+        (UUID)
+            batches
+                .create(
+                    user,
+                    "leased",
+                    new BatchService.Manifest(List.of(new BatchService.FileSpec("one.txt", 100))))
+                .get("jobId");
+    batches.submit(user, job);
+    store.jdbc.update(
+        "UPDATE jobs SET verification_token=?,verification_until=unixepoch()+90 WHERE id=?",
+        UUID.randomUUID(),
+        job);
+    var verification = new Verification(store, blobs);
+    assertFalse(verification.chunk(job));
+    verify(blobs, never()).head(anyString());
+    store.jdbc.update("UPDATE jobs SET verification_until=unixepoch()-1 WHERE id=?", job);
+    assertTrue(verification.chunk(job));
+    assertEquals("QUEUED", store.owned(user, job).get("status"));
+  }
+
+  @Test
   void deletingDuringVerificationDoesNotQueue() throws Exception {
     UUID job =
         (UUID)

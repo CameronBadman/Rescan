@@ -37,6 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose build
+      - run: docker run --rm --network none --cpus 1 --memory 4g --entrypoint /app/venv/bin/python -v "$GITHUB_WORKSPACE/scripts/benchmark_ocr.py:/app/benchmark_ocr.py:ro" rescan-worker:local /app/benchmark_ocr.py
       - run: docker compose up -d
       - run: timeout 180 bash -c 'until curl -fsS http://localhost:8080/actuator/health; do sleep 3; done'
       - run: python3 scripts/smoke.py --timeout 600 --delete

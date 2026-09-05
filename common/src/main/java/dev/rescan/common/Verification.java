@@ -13,7 +13,7 @@ public final class Verification {
     this.blobs = blobs;
   }
 
-  public void chunk(UUID job) {
+  public boolean chunk(UUID job) {
     UUID token = UUID.randomUUID();
     var claimed =
         store.jdbc.queryForList(
@@ -22,7 +22,7 @@ public final class Verification {
                 + " verification_until<unixepoch()) RETURNING verification_generation",
             token,
             job);
-    if (claimed.isEmpty()) return;
+    if (claimed.isEmpty()) return false;
     long generation = ((Number) claimed.getFirst().get("verification_generation")).longValue();
     try {
       var docs =
@@ -111,6 +111,7 @@ public final class Verification {
                   job);
             }
           });
+      return true;
     } catch (Exception e) {
       throw new IllegalStateException("Verification chunk failed", e);
     } finally {

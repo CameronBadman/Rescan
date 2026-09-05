@@ -30,6 +30,7 @@ jobs:
         run: |
           docker build --target api-lambda -t "$ECR_API:$RELEASE_ID" .
           docker build --target worker -t "$ECR_WORKER:$RELEASE_ID" .
+          docker run --rm --network none --cpus 1 --memory 4g --entrypoint /app/venv/bin/python -v "$GITHUB_WORKSPACE/scripts/benchmark_ocr.py:/app/benchmark_ocr.py:ro" "$ECR_WORKER:$RELEASE_ID" /app/benchmark_ocr.py > /tmp/ocr-benchmark.json
           docker compose build controller dev-auth
           export RESCAN_API_IMAGE="$ECR_API:$RELEASE_ID" RESCAN_WORKER_IMAGE="$ECR_WORKER:$RELEASE_ID"
           docker compose up -d --no-build
@@ -56,4 +57,5 @@ jobs:
           jq -n --arg commit "$GITHUB_SHA" --arg release "$RELEASE_ID" --arg api "$ECR_API@$API_DIGEST" --arg worker "$ECR_WORKER@$WORKER_DIGEST" --arg jar "$JAR_SHA" '{commit:$commit,release:$release,api_image:$api,worker_image:$worker,controller_sha256:$jar}' > /tmp/release.json
           aws s3 cp controller/target/controller-0.1.0-SNAPSHOT.jar "s3://$ARTIFACT_BUCKET/releases/$RELEASE_ID/controller.jar" --sse AES256
           aws s3 cp /tmp/release.json "s3://$ARTIFACT_BUCKET/releases/$RELEASE_ID/manifest.json" --sse AES256
+          aws s3 cp /tmp/ocr-benchmark.json "s3://$ARTIFACT_BUCKET/releases/$RELEASE_ID/ocr-benchmark.json" --sse AES256
           echo "Release: $RELEASE_ID" >> "$GITHUB_STEP_SUMMARY"

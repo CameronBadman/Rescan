@@ -64,7 +64,7 @@ resource "aws_ecs_task_definition" "worker" {
   container_definitions = jsonencode([{
     name             = "worker", image = var.worker_image, essential = true, stopTimeout = 120,
     linuxParameters  = { initProcessEnabled = true },
-    healthCheck = { command = ["CMD-SHELL", "test -f /tmp/rescan-worker-ready"], interval = 30, timeout = 5, retries = 3, startPeriod = 180 },
+    healthCheck      = { command = ["CMD-SHELL", "test -f /tmp/rescan-worker-ready"], interval = 30, timeout = 5, retries = 3, startPeriod = 180 },
     environment      = [for k, v in merge(local.common_env, { AWS_REGION = var.region, REDIS_SECRET_ARN = var.redis_secret_arn, OCR_THREADS = "1", OCR_PRELOAD = "true" }) : { name = k, value = v }],
     logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.services["worker"].name, awslogs-region = var.region, awslogs-stream-prefix = "worker" } }
   }])
@@ -122,6 +122,7 @@ resource "aws_lambda_function" "controller" {
     ECS_CLUSTER        = aws_ecs_cluster.main.name,
     ECS_WORKER_SERVICE = aws_ecs_service.worker.name,
     VERIFIER_FUNCTION  = aws_lambda_function.verifier.function_name
+    PROCESSING_ENABLED = tostring(var.controller_enabled)
   }) }
   depends_on = [aws_iam_role_policy.tasks]
 }

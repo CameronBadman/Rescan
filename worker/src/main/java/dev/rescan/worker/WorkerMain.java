@@ -34,8 +34,8 @@ public class WorkerMain {
       var work = new WorkStore(context.getBean(JobStore.class));
       vision = service;
       if (Boolean.parseBoolean(Settings.get("OCR_PRELOAD", "true"))) vision.ensure();
-      Files.writeString(Path.of("/tmp/rescan-worker-ready"),"ready");
-      LOG.log(System.Logger.Level.INFO,"Worker ready; OCR preload complete");
+      Files.writeString(Path.of("/tmp/rescan-worker-ready"), "ready");
+      LOG.log(System.Logger.Level.INFO, "Worker ready; OCR preload complete");
       String consumer = UUID.randomUUID().toString();
       while (RUNNING.get()) {
         try {
@@ -72,7 +72,10 @@ public class WorkerMain {
             } catch (Exception e) {
               alive.set(false);
               kill(CHILD.get());
-              try { vision.stop(); } catch(java.io.IOException ignored) { }
+              try {
+                vision.stop();
+              } catch (java.io.IOException ignored) {
+              }
             }
           },
           20,
@@ -143,6 +146,7 @@ public class WorkerMain {
       work.complete(c, key, () -> blobs.putJson(key, output));
       LOG.log(System.Logger.Level.INFO, "Document completed: {0}", c.id());
     } catch (DocumentParser.ParseFailure e) {
+      if (Set.of("TIMEOUT", "OCR_FAILED").contains(e.code)) vision.stop();
       boolean terminal =
           work.fail(c, e.code, Set.of("TIMEOUT", "PARSER_FAILED", "OCR_FAILED").contains(e.code));
       if (terminal) queue.dead(c.id(), e.code);
