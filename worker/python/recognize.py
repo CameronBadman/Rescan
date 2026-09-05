@@ -5,9 +5,11 @@ import sys
 import tempfile
 from pathlib import Path
 from reading_order import order_lines
+from functools import lru_cache
 
 
-def recognize(source):
+@lru_cache(maxsize=1)
+def models():
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(Path(tempfile.gettempdir()) / "rescan-paddlex"))
     import numpy as np
     import torch
@@ -15,13 +17,21 @@ def recognize(source):
     from paddleocr import TextDetection
     from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
-    torch.set_num_threads(4)
+    torch.set_num_threads(int(os.getenv("OCR_THREADS", "1")))
     Image.MAX_IMAGE_PIXELS = int(os.getenv("MAX_PAGE_PIXELS", "12000000"))
-    max_pages = int(os.getenv("MAX_PAGES", "50"))
     root = os.getenv("VIT_MODEL_DIR", "/app/models/recognizer")
     processor = TrOCRProcessor.from_pretrained(root, local_files_only=True, use_fast=False)
     model = VisionEncoderDecoderModel.from_pretrained(root, local_files_only=True, use_safetensors=True).eval()
-    detector = TextDetection(model_name="PP-OCRv5_mobile_det", model_dir=os.getenv("DETECTOR_MODEL_DIR", "/app/models/detector"), device="cpu", enable_mkldnn=False, cpu_threads=4)
+    detector = TextDetection(model_name="PP-OCRv5_mobile_det", model_dir=os.getenv("DETECTOR_MODEL_DIR", "/app/models/detector"), device="cpu", enable_mkldnn=False, cpu_threads=int(os.getenv("OCR_THREADS", "1")))
+    return processor, model, detector
+
+
+def recognize(source):
+    import numpy as np
+    import torch
+    from PIL import Image, ImageOps, ImageSequence
+    processor, model, detector = models()
+    max_pages = int(os.getenv("MAX_PAGES", "50"))
     pages = []
     paths = sorted(source.glob("*.png")) if source.is_dir() else [source]
     for path in paths:
@@ -43,7 +53,7 @@ def recognize(source):
                     crop = image.crop((int(x0), int(y0), int(x1), int(y1)))
                     pixels = processor(images=crop, return_tensors="pt").pixel_values
                     with torch.inference_mode():
-                        tokens = model.generate(pixels, max_new_tokens=256, num_beams=4)
+                        tokens = model.generate(pixels, max_new_tokens=256, num_beams=1)
                     if tokens.shape[-1] >= 257 and int(tokens[0, -1]) != model.config.decoder.eos_token_id:
                         raise ValueError("TOKEN_LIMIT")
                     text = processor.batch_decode(tokens, skip_special_tokens=True)[0].strip()
@@ -59,13 +69,46 @@ def recognize(source):
             "modelRevision": revisions["recognizer"]["revision"]}
 
 
-if __name__ == "__main__":
+def result(source):
     try:
-        result = recognize(Path(sys.argv[1]))
-        if len(result["text"].encode("utf-8")) > 10 * 1024 * 1024:
+        parsed = recognize(Path(source))
+        if len(parsed["text"].encode("utf-8")) > 10 * 1024 * 1024:
             raise ValueError("TEXT_LIMIT")
-        Path(sys.argv[2]).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        return parsed
     except Exception as error:
         code = str(error) if str(error) in {"PAGE_LIMIT", "IMAGE_LIMIT", "TEXT_LIMIT", "TOKEN_LIMIT"} else "OCR_FAILED"
-        Path(sys.argv[2]).write_text(json.dumps({"code": code}))
-        sys.exit(2)
+        return {"code": code}
+
+
+if __name__ == "__main__":
+    import socket
+    if sys.argv[1] == "--serve":
+        models()  # Preload before advertising readiness for demo warming.
+        address = sys.argv[2]
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(address)
+            os.chmod(address, 0o600)
+            server.listen(1)
+            while True:
+                connection, _ = server.accept()
+                with connection:
+                    connection.settimeout(900)
+                    try:
+                        line = connection.makefile("rb").readline(4096)
+                        source = Path(json.loads(line)["source"]).resolve()
+                        if not str(source).startswith(tempfile.gettempdir() + "/rescan-document-"):
+                            raise ValueError("Unexpected OCR path")
+                        connection.sendall(json.dumps(result(source)).encode() + b"\n")
+                    except (OSError, ValueError, KeyError):
+                        pass
+    else:
+        if os.getenv("VIT_SOCKET"):
+            with socket.socket(socket.AF_UNIX) as client:
+                client.settimeout(900)
+                client.connect(os.environ["VIT_SOCKET"])
+                client.sendall(json.dumps({"source": sys.argv[1]}).encode() + b"\n")
+                parsed = json.loads(client.makefile("rb").readline(32 * 1024 * 1024))
+        else:
+            parsed = result(sys.argv[1])
+        Path(sys.argv[2]).write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
+        sys.exit(2 if "code" in parsed else 0)

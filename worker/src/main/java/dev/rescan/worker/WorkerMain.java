@@ -13,6 +13,7 @@ public class WorkerMain {
   private static final System.Logger LOG = System.getLogger(WorkerMain.class.getName());
   private static final AtomicBoolean RUNNING = new AtomicBoolean(true);
   private static final AtomicReference<Process> CHILD = new AtomicReference<>();
+  private static VisionService vision;
 
   public static void main(String[] args) throws Exception {
     if (args.length > 0 && args[0].equals("--parse")) {
@@ -26,10 +27,13 @@ public class WorkerMain {
                   RUNNING.set(false);
                   kill(CHILD.get());
                 }));
-    try (var context = new AnnotationConfigApplicationContext(Infrastructure.class);
+    try (var service = new VisionService();
+        var context = new AnnotationConfigApplicationContext(Infrastructure.class);
         var blobs = new BlobStore();
         var queue = new Queue()) {
       var work = new WorkStore(context.getBean(JobStore.class));
+      vision=service;
+      if(Boolean.parseBoolean(Settings.get("OCR_PRELOAD","true"))) vision.ensure();
       String consumer = UUID.randomUUID().toString();
       while (RUNNING.get()) {
         try {
@@ -108,6 +112,10 @@ public class WorkerMain {
       env.putAll(kept);
       env.put("HF_HUB_OFFLINE", "1");
       env.put("TRANSFORMERS_OFFLINE", "1");
+      if(Boolean.parseBoolean(Settings.get("OCR_PRELOAD","true"))) {
+        vision.ensure();
+        env.put("VIT_SOCKET",vision.socket.toString());
+      }
       builder
           .redirectOutput(ProcessBuilder.Redirect.DISCARD)
           .redirectError(ProcessBuilder.Redirect.DISCARD);
@@ -115,6 +123,7 @@ public class WorkerMain {
       CHILD.set(child);
       if (!child.waitFor(Settings.integer("DOCUMENT_TIMEOUT_SECONDS", 900), TimeUnit.SECONDS)) {
         kill(child);
+        vision.stop();
         throw new DocumentParser.ParseFailure("TIMEOUT");
       }
       CHILD.compareAndSet(child, null);
