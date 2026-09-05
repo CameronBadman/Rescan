@@ -11,12 +11,14 @@ from __future__ import annotations
 import io
 import json
 import logging
+import secrets
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rescan.config import settings
@@ -52,6 +54,11 @@ async def lifespan(app: FastAPI):
     client = build_client()
     state.runner = PipelineRunner(state.store, client, Extractor())
     state.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rescan-job")
+    if not settings.api_keys:
+        log.warning(
+            "RESCAN_API_KEYS is empty: the API is unauthenticated. Set it before "
+            "exposing this service beyond localhost."
+        )
     log.info("rescan API ready (llm backend=%s)", settings.llm_backend)
     yield
     state.pool.shutdown(wait=False, cancel_futures=True)
@@ -65,6 +72,43 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# --------------------------------------------------------------------------
+# Authentication
+# --------------------------------------------------------------------------
+
+# Health is public so a load balancer can probe it without a credential.
+PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+
+
+def _presented_key(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.headers.get("x-api-key")
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """Reject unauthenticated requests when API keys are configured.
+
+    Candidate data is sensitive personal information, so this is a deny-by-
+    default check across every route rather than a per-endpoint dependency that
+    a new endpoint could forget to declare.
+    """
+    if not settings.api_keys or request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    presented = _presented_key(request)
+    if not presented or not any(
+        secrets.compare_digest(presented, configured) for configured in settings.api_keys
+    ):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "missing or invalid API key"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 # --------------------------------------------------------------------------
 # Request / response models

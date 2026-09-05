@@ -12,6 +12,7 @@ dependencies = [
     "python-multipart",
     "pypdf",
     "python-docx",
+    "mcp>=2",
 ]
 
 [project.optional-dependencies]
@@ -26,3 +27,4 @@ include = ["rescan*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
