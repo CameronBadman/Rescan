@@ -107,7 +107,7 @@ async def test_describe_and_parse():
     assert reference["counts"]["fields"] >= 60
     ok = unwrap(await server.call_tool("parse_query", {"dsl": "require aqf >= 7"}))
     assert ok["ok"] and ok["canonical"] == "REQUIRE aqf >= 7"
-    bad = unwrap(await server.call_tool("parse_query", {"dsl": 'employer = "Google"'}))
+    bad = unwrap(await server.call_tool("parse_query", {"dsl": 'region = "Brisbane"'}))
     assert bad["ok"] is False and bad["error"]["forbidden"] is True and bad["error"]["statutes"]
 
 

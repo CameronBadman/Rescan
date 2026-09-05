@@ -295,6 +295,7 @@ _FIELD_LIST: list[FieldSpec] = [
     _l("role_titles", "role titles", "Titles of every listed role.", lambda p: [r.title for r in p.experience if r.title], group="experience"),
     _l("current_role_titles", "current role titles", "Titles of roles marked current.",
        lambda p: [r.title for r in p.experience if r.is_current and r.title], group="experience"),
+    _l("employers", "employers", "Employer names across listed roles.", lambda p: [r.employer for r in p.experience if r.employer], group="experience"),
     _l("industries", "industries", "Industries across listed roles.", lambda p: [r.industry for r in p.experience if r.industry], group="experience"),
     _l("employment_types", "employment types", "Employment types across listed roles.",
        lambda p: [r.employment_type for r in p.experience if r.employment_type], group="experience"),
@@ -377,6 +378,8 @@ ALIASES: dict[str, str] = {
     "license": "licences",
     "tools": "tool_skills",
     "titles": "role_titles",
+    "companies": "employers",
+    "company": "employers",
     "roles": "role_titles",
     "positions": "role_titles",
     "degrees": "qualification_titles",
@@ -421,12 +424,13 @@ RECORDS: dict[str, RecordSpec] = {
     "role": RecordSpec(
         name="role",
         plural="roles",
-        description="One employment entry: `title` (text), `months` (number), `is_current` (boolean), `seniority` "
+        description="One employment entry: `title` (text), `employer` (text), `months` (number), `is_current` (boolean), `seniority` "
                     "(intern … executive), `industry` (text), `employment_type` (permanent | contract | casual | internship | "
                     "freelance | volunteer | other), `team_size` (number), `technologies` (list), `summary` (text).",
         reader=lambda p: list(p.experience),
         fields={
             "title": _rf("title", "text", "role title", "Job title as written.", lambda r: r.title),
+            "employer": _rf("employer", "text", "employer", "Employer name as written (absent only where it revealed a protected attribute).", lambda r: r.employer),
             "months": _rf("months", "number", "months in the role", "Duration of the role in months.",
                           lambda r: r.months, ("{observed:g} months in the role", "{target:g} months")),
             "is_current": _rf("is_current", "bool", "currently held", "Whether the role is current.", lambda r: r.is_current),
@@ -512,11 +516,6 @@ FORBIDDEN: dict[str, ForbiddenField] = {
         ("institution_tier", "institution tier is a prestige proxy that tracks social origin and country of study", ("RDA_1975", "ADA_QLD_1991"), "aqf >= 7"),
         ("university", "institution name reintroduces demographic signal and prefers local over overseas study", ("RDA_1975", "ADA_QLD_1991"), "aqf >= 7"),
         ("universities", "institution name reintroduces demographic signal and prefers local over overseas study", ("RDA_1975", "ADA_QLD_1991"), "aqf >= 7"),
-        ("employer", "employer prestige is an unvalidated proxy for social origin and penalises overseas experience",
-         ("RDA_1975", "ADA_QLD_1991"), "Test the capability instead, e.g. ANY role WHERE months >= 24 AND industry = \"banking\", or ASK \"...\" for a specific achievement."),
-        ("employers", "employer prestige is an unvalidated proxy for social origin and penalises overseas experience", ("RDA_1975", "ADA_QLD_1991"), "ANY role WHERE months >= 24"),
-        ("company", "employer prestige is an unvalidated proxy for social origin and penalises overseas experience", ("RDA_1975", "ADA_QLD_1991"), "ANY role WHERE months >= 24"),
-        ("companies", "employer prestige is an unvalidated proxy for social origin and penalises overseas experience", ("RDA_1975", "ADA_QLD_1991"), "ANY role WHERE months >= 24"),
         ("completion_year", "graduation year is a proxy for age", ("ADA_2004", "ADA_QLD_1991"), "years_experience >= N"),
         ("graduation_year", "graduation year is a proxy for age", ("ADA_2004", "ADA_QLD_1991"), "years_experience >= N"),
         ("start", "role start dates reveal age when read across a career", ("ADA_2004", "ADA_QLD_1991"), "months, or years_experience"),

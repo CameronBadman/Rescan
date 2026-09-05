@@ -58,7 +58,8 @@ def test_fields_endpoint_documents_the_whole_language(client):
     assert body["counts"]["fields"] >= 60
     assert {"skill", "role", "qualification", "project"} == {r["name"] for r in body["records"]}
     forbidden = {f["name"]: f for f in body["forbidden"]}
-    assert forbidden["region"]["statutes"] and forbidden["employer"]["alternative"]
+    assert forbidden["region"]["statutes"] and forbidden["institution"]["alternative"]
+    assert "employer" not in forbidden, "employer names are legitimate data"
     assert "REQUIRE" in body["grammar"] and body["examples"]
 
 

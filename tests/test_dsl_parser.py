@@ -124,7 +124,7 @@ def test_bool_and_enum_forms():
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["region", "employer", "institution", "completion_year", "nationality", "summary", "age"])
+@pytest.mark.parametrize("name", ["region", "suburb", "institution", "completion_year", "nationality", "summary", "age"])
 def test_forbidden_fields_fail_at_parse_time_with_a_statute(name):
     with pytest.raises(DslFieldError) as excinfo:
         parse_expr(f'{name} = "x"')
@@ -139,7 +139,7 @@ def test_forbidden_fields_fail_at_parse_time_with_a_statute(name):
 
 def test_forbidden_fields_are_also_caught_inside_where():
     with pytest.raises(DslFieldError) as excinfo:
-        parse_expr('ANY role WHERE employer = "Google"')
+        parse_expr('ANY role WHERE start = "2020"')
     assert excinfo.value.forbidden is not None
 
 
@@ -234,3 +234,9 @@ def test_reference_lists_everything_and_reads_as_prompt_text():
     assert "FORBIDDEN IDENTIFIERS" in text and "GRAMMAR" in text and "EXAMPLES" in text
     for spec in FIELDS.values():
         assert spec.name in text
+
+
+def test_employer_is_queryable():
+    expr = parse_expr('ANY role WHERE employer = "Atlassian" AND months >= 12')
+    assert fields_used(expr) == ["role.employer", "role.months"]
+    assert parse_expr('companies HAS ANY ("Atlassian")').to_dsl() == 'employers HAS ANY ("Atlassian")'

@@ -301,7 +301,8 @@ Remove or generalise:
 
 Preserve exactly, because they are job-relevant:
 - Skills, technologies, and the evidence for them.
-- Role titles, employer *industry* where it matters, durations and achievements.
+- Role titles, employer names, industries, durations and achievements. An
+  employer name is dropped in code only where it reveals a protected attribute.
 - Qualification level and field of study.
 - Work rights status — a lawful requirement, not a demographic proxy.
 - Languages, which are a job-relevant capability.
@@ -402,7 +403,8 @@ def compile_dsl_system() -> str:
     return f"""You turn a recruiter's hiring plan into screening rules written in a small
 query language, under Australian anti-discrimination law. You reason first,
 then write rules. The rules run against anonymized candidate profiles: no
-name, institution, suburb, employer name, or graduation year exists in them.
+name, institution, suburb, or graduation year exists in them; employer names
+and industries do.
 
 Work in this order and write your reasoning down:
 
@@ -516,7 +518,7 @@ JUDGE_SCHEMA: dict[str, Any] = {
 JUDGE_SYSTEM = f"""You answer one yes/no question about a candidate from their anonymized profile,
 for a recruitment screening rule.
 
-The profile is de-identified: no name, institution, employer name, suburb or
+The profile is de-identified: no name, institution, suburb or
 graduation year. Do not speculate about any of them.
 
 Rules:

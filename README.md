@@ -133,14 +133,18 @@ TRUE` is `TRUE`, anything else is unknown and goes to manual review. Empty lists
 are unknown, not zero. An aggregate over records that could not be assessed
 reports a range and stays undecided unless the answer is the same either way.
 
-**Proxies cannot enter through a field name.** `region`, `employer`,
-`institution`, `completion_year`, `nationality`, `summary` and forty-odd others
-are *forbidden identifiers*: a rule naming one fails at parse time with the
-statute it engages and the alternative to write instead —
-`'employer' is not queryable: employer prestige is an unvalidated proxy for
-social origin … (Racial Discrimination Act 1975 (Cth) ss 9, 15 …). Instead: ANY
-role WHERE months >= 24`. String literals and `ASK` questions are scanned
-against the risky-phrase table too.
+**Proxies cannot enter through a field name.** `region`, `institution`,
+`completion_year`, `nationality`, `summary` and forty-odd others are *forbidden
+identifiers*: a rule naming one fails at parse time with the statute it engages
+and the alternative to write instead —
+`'region' is not queryable: location is a proxy for race and social origin …
+(Racial Discrimination Act 1975 (Cth) ss 9, 15 …)`. String literals and `ASK`
+questions are scanned against the risky-phrase table too. Employer names are
+*not* forbidden: they stay in the profile and are queryable (`ANY role WHERE
+employer = "…"`); only an employer whose name reveals a protected attribute — a
+party, a union, a religious body, an ethnic or advocacy group — is dropped, with
+the reason recorded. Prestige phrasing in a rule ("leading company") is still
+flagged for review.
 
 **Every outcome is a sentence.** "Candidate has 3 years of professional
 experience; the rule requires at least 5 years." An `AND` names only the

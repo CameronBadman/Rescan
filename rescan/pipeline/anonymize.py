@@ -28,6 +28,29 @@ from rescan.schemas import AnonymizedProfile, Qualification, Redaction, Structur
 log = logging.getLogger(__name__)
 
 REDACTED = "[redacted]"
+
+# Employer names stay: where someone worked is capability-relevant context.
+# The only employers removed are those whose name itself reveals a protected
+# attribute — a party, a union, a religious body, an ethnic or national
+# community organisation, an advocacy or identity group.
+CHARGED_EMPLOYER = re.compile(
+    r"\b(labor|labour|liberal|greens?|nationals?|one nation|democrats?|republican|socialist|communist"
+    r"|party|political|campaign|lobby|activis\w*|advocacy"
+    r"|union|cfmeu|actu|unions?\s+nsw|workers'? union"
+    r"|church|mosque|temple|synagogue|diocese|parish|ministr(y|ies)|mission|chaplain\w*"
+    r"|islamic|muslim|christian|catholic|anglican|baptist|jewish|hindu|buddhist|sikh|evangel\w*"
+    r"|lgbt\w*|queer|pride|gay|lesbian"
+    r"|indigenous|aboriginal|torres strait|multicultural|migrant|refugee|ethnic"
+    r"|malayalee|chinese|indian|african|greek|italian|vietnamese|korean|lebanese|arab|filipino"
+    r"|veterans?|rsl|disab\w*|women'?s|men'?s)\b",
+    re.IGNORECASE,
+)
+
+
+def employer_is_charged(employer: str | None) -> bool:
+    return bool(employer) and CHARGED_EMPLOYER.search(employer) is not None
+
+
 # Short tokens are skipped when scrubbing: a two-letter name fragment matches
 # far too much ordinary text to remove safely.
 MIN_SCRUB_TOKEN = 3
@@ -190,18 +213,23 @@ def anonymize_resume(
     experience = [role.model_copy(deep=True) for role in resume.experience]
     for role in experience:
         role.summary = scrub_text(role.summary, tokens)
-        # The employer name is a prestige proxy and often re-identifies the
-        # candidate; industry and duration carry what the job needs.
-        if role.employer:
-            role.employer = None
-    if any(role.employer for role in resume.experience):
-        qualification_redactions.append(
-            Redaction(
-                field="experience.employer",
-                action="removed",
-                reason="Employer name is an unvalidated prestige proxy; industry, title and duration are kept.",
+        # Employer names are kept. The exception is an employer whose name
+        # reveals a protected attribute — political, religious, ethnic, union,
+        # identity — which is dropped with the reason recorded.
+        if employer_is_charged(role.employer):
+            qualification_redactions.append(
+                Redaction(
+                    field="experience.employer",
+                    action="removed",
+                    reason=(
+                        f"Employer {role.employer!r} signals political opinion, religion, ethnicity, "
+                        "union membership or another protected attribute; industry, title and duration are kept."
+                    ),
+                )
             )
-        )
+            role.employer = None
+        else:
+            role.employer = scrub_text(role.employer, tokens)
 
     projects = [project.model_copy(deep=True) for project in resume.projects]
     for project in projects:
