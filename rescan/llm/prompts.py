@@ -34,6 +34,13 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
         "languages",
         "affiliations",
         "certifications",
+        "projects",
+        "licences",
+        "security_clearance",
+        "management_years",
+        "people_managed_max",
+        "publications_count",
+        "availability_weeks",
         "extraction_notes",
     ],
     "properties": {
@@ -57,7 +64,7 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["name", "category", "years", "evidence"],
+                "required": ["name", "category", "years", "proficiency", "evidence"],
                 "properties": {
                     "name": {"type": "string"},
                     "category": {
@@ -65,6 +72,11 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
                         "enum": ["technical", "domain", "language", "tool", "soft", "other"],
                     },
                     "years": {"type": ["number", "null"]},
+                    "proficiency": {
+                        "type": ["string", "null"],
+                        "enum": ["beginner", "intermediate", "advanced", "expert", None],
+                        "description": "Only when the resume states a level.",
+                    },
                     "evidence": _str_or_null("Where in the resume this skill was demonstrated."),
                 },
             },
@@ -74,7 +86,10 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["title", "employer", "start", "end", "is_current", "months", "summary"],
+                "required": [
+                    "title", "employer", "start", "end", "is_current", "months", "summary",
+                    "seniority", "industry", "employment_type", "team_size", "technologies",
+                ],
                 "properties": {
                     "title": _str_or_null("Role title."),
                     "employer": _str_or_null("Employer name."),
@@ -83,6 +98,24 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
                     "is_current": {"type": "boolean"},
                     "months": {"type": ["number", "null"], "description": "Duration in months."},
                     "summary": _str_or_null("One line on what the person did."),
+                    "seniority": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "intern", "graduate", "junior", "mid", "senior", "lead", "principal",
+                            "manager", "head", "director", "executive", None,
+                        ],
+                        "description": "Level implied by the title only; null if unclear.",
+                    },
+                    "industry": _str_or_null("Sector of the employer, e.g. 'banking', 'health', 'SaaS'."),
+                    "employment_type": {
+                        "type": ["string", "null"],
+                        "enum": ["permanent", "contract", "casual", "internship", "freelance", "volunteer", "other", None],
+                    },
+                    "team_size": {
+                        "type": ["integer", "null"],
+                        "description": "People managed or led in this role, only when stated.",
+                    },
+                    "technologies": {"type": "array", "items": {"type": "string"}},
                 },
             },
         },
@@ -141,6 +174,37 @@ STRUCTURE_SCHEMA: dict[str, Any] = {
             "description": "Clubs, societies, memberships, volunteer organisations.",
         },
         "certifications": {"type": "array", "items": {"type": "string"}},
+        "projects": {
+            "type": "array",
+            "description": "Named projects, open-source work, theses.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "summary", "technologies", "months"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "summary": _str_or_null("One line on what was built."),
+                    "technologies": {"type": "array", "items": {"type": "string"}},
+                    "months": {"type": ["number", "null"]},
+                },
+            },
+        },
+        "licences": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Licences and registrations, e.g. driver's licence, forklift, AHPRA registration.",
+        },
+        "security_clearance": _str_or_null("Security clearance held if stated, e.g. 'Baseline', 'NV1'."),
+        "management_years": {
+            "type": ["number", "null"],
+            "description": "Years in roles that managed people, from the role history.",
+        },
+        "people_managed_max": {
+            "type": ["integer", "null"],
+            "description": "Largest team the candidate reports managing or leading.",
+        },
+        "publications_count": {"type": ["integer", "null"]},
+        "availability_weeks": {"type": ["number", "null"], "description": "Notice period in weeks, if stated."},
         "extraction_notes": {
             "type": "array",
             "items": {"type": "string"},
@@ -161,6 +225,9 @@ Rules:
   use "unknown". Never infer work rights or visa status from a person's name,
   country of education, or country of previous employment.
 - Record total_years_experience from employment dates, excluding study.
+- Seniority comes from the title only ('Senior Engineer' -> senior, 'Head of
+  Data' -> head); leave it null when the title does not say. team_size,
+  management_years and people_managed_max only when the resume states a number.
 - Put anything ambiguous or unreadable into extraction_notes.
 
 Return JSON only."""

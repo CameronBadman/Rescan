@@ -32,7 +32,76 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "languages": ("languages",),
     "affiliations": ("affiliations", "interests", "activities", "memberships", "volunteering"),
     "certifications": ("certifications", "certificates", "licences", "licenses"),
+    "projects": ("projects", "personal projects", "open source", "selected projects"),
+    "publications": ("publications", "papers", "patents"),
 }
+
+SENIORITY_RE: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(chief|cto|ceo|cfo|coo|vp|vice president|executive)\b", re.I), "executive"),
+    (re.compile(r"\bdirector\b", re.I), "director"),
+    (re.compile(r"\bhead of\b|\bhead\b", re.I), "head"),
+    (re.compile(r"\bmanager\b|\bmanagement\b", re.I), "manager"),
+    (re.compile(r"\bprincipal\b|\bstaff\b|\barchitect\b", re.I), "principal"),
+    (re.compile(r"\blead\b|\bteam lead\b|\btech lead\b", re.I), "lead"),
+    (re.compile(r"\bsenior\b|\bsr\.?\b", re.I), "senior"),
+    (re.compile(r"\bintern\b|\binternship\b", re.I), "intern"),
+    (re.compile(r"\bgraduate\b|\bgrad\b", re.I), "graduate"),
+    (re.compile(r"\bjunior\b|\bjr\.?\b|\bassociate\b|\bassistant\b", re.I), "junior"),
+]
+TEAM_SIZE_RE = re.compile(
+    r"\b(?:team of|managed|managing|led|leading|supervised|mentored)\s+(?:a\s+)?(?:team\s+of\s+)?(\d{1,3})\b",
+    re.I,
+)
+EMPLOYMENT_TYPE_RE: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bintern(ship)?\b", re.I), "internship"),
+    (re.compile(r"\bcontract(or)?\b|\bfixed[- ]term\b", re.I), "contract"),
+    (re.compile(r"\bcasual\b", re.I), "casual"),
+    (re.compile(r"\bfreelanc\w*\b|\bconsultant\b", re.I), "freelance"),
+    (re.compile(r"\bvolunteer\w*\b", re.I), "volunteer"),
+]
+LICENCE_RE = re.compile(r"\b(licen[cs]e|registration|registered|ahpra|forklift|white card|working with children)\b", re.I)
+CLEARANCE_RE = re.compile(r"\b(baseline|nv1|nv2|positive vetting|negative vetting|security clearance)\b", re.I)
+NOTICE_RE = re.compile(r"\b(\d{1,2})\s*(weeks?|months?)\s*(?:notice|notice period)\b|\bnotice(?: period)?\s*(?:of|:)?\s*(\d{1,2})\s*(weeks?|months?)\b", re.I)
+INDUSTRY_HINTS: dict[str, tuple[str, ...]] = {
+    "banking": ("bank", "banking", "finance", "fintech", "payments"),
+    "health": ("health", "hospital", "clinic", "medical", "pharma"),
+    "government": ("government", "department of", "council", "public service"),
+    "education": ("university", "school", "education", "tafe"),
+    "retail": ("retail", "ecommerce", "e-commerce", "store"),
+    "mining": ("mining", "resources", "energy", "oil", "gas"),
+    "consulting": ("consulting", "consultancy", "advisory"),
+    "software": ("software", "saas", "technologies", "tech", "labs", "digital", "systems"),
+    "telecommunications": ("telco", "telecom", "telstra", "optus"),
+}
+
+
+def _seniority_for(title: str | None) -> str | None:
+    if not title:
+        return None
+    for pattern, level in SENIORITY_RE:
+        if pattern.search(title):
+            return level
+    return None
+
+
+def _employment_type_for(text: str) -> str | None:
+    for pattern, kind in EMPLOYMENT_TYPE_RE:
+        if pattern.search(text):
+            return kind
+    return None
+
+
+def _industry_for(employer: str | None, summary: str | None) -> str | None:
+    haystack = f"{employer or ''} {summary or ''}".lower()
+    for industry, hints in INDUSTRY_HINTS.items():
+        if any(hint in haystack for hint in hints):
+            return industry
+    return None
+
+
+def _team_size_for(text: str) -> int | None:
+    sizes = [int(m.group(1)) for m in TEAM_SIZE_RE.finditer(text or "")]
+    return max(sizes) if sizes else None
 
 QUALIFICATION_HINT = re.compile(
     r"\b(bachelor|master|phd|doctor|diploma|certificate|graduate|honours|honors"
@@ -261,9 +330,34 @@ def _parse_experience(lines: list[str]) -> list[dict[str, Any]]:
                 "is_current": is_current,
                 "months": months,
                 "summary": None,
+                "seniority": _seniority_for(head.strip()),
+                "industry": None,
+                "employment_type": _employment_type_for(line),
+                "team_size": None,
+                "technologies": [],
             }
         )
+    for role in roles:
+        role["industry"] = _industry_for(role["employer"], role["summary"])
+        role["team_size"] = _team_size_for(role["summary"] or "")
+        if role["employment_type"] is None:
+            role["employment_type"] = _employment_type_for(role["summary"] or "")
     return roles
+
+
+def _parse_projects(lines: list[str]) -> list[dict[str, Any]]:
+    projects: list[dict[str, Any]] = []
+    for line in lines:
+        text = line.strip(" .-•*\t")
+        if not text or len(text) < 4:
+            continue
+        name, _, rest = text.partition(" - ") if " - " in text else text.partition(": ")
+        name = (name or text).strip()[:80]
+        technologies = [
+            token.strip() for token in re.split(r"[,/]", rest) if 1 < len(token.strip()) <= 30
+        ][:8] if rest else []
+        projects.append({"name": name, "summary": rest.strip()[:200] or None, "technologies": technologies, "months": None})
+    return projects[:10]
 
 
 def _parse_qualifications(lines: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -404,6 +498,20 @@ def handle_structure(request: LLMRequest) -> dict[str, Any]:
         affiliations.extend(p.strip(" .-•") for p in re.split(r"[,;]", line) if p.strip())
 
     certifications = [line.strip(" .-•") for line in sections.get("certifications", []) if line.strip()]
+    licences = [item for item in certifications if LICENCE_RE.search(item)]
+    clearance = CLEARANCE_RE.search(text)
+    notice = NOTICE_RE.search(text)
+    availability_weeks = None
+    if notice:
+        amount = int(notice.group(1) or notice.group(3))
+        unit = (notice.group(2) or notice.group(4) or "").lower()
+        availability_weeks = float(amount * 4 if unit.startswith("month") else amount)
+    managing = [role for role in roles if role["seniority"] in {"lead", "manager", "head", "director", "executive"}]
+    management_months = [role["months"] for role in managing if role["months"] is not None]
+    team_sizes = [role["team_size"] for role in roles if role["team_size"]] + (
+        [_team_size_for(text)] if _team_size_for(text) else []
+    )
+    publications = [line for line in sections.get("publications", []) if line.strip()]
 
     notes: list[str] = []
     if not roles:
@@ -423,6 +531,13 @@ def handle_structure(request: LLMRequest) -> dict[str, Any]:
         "languages": languages,
         "affiliations": affiliations,
         "certifications": certifications,
+        "projects": _parse_projects(sections.get("projects", [])),
+        "licences": licences,
+        "security_clearance": clearance.group(1).title() if clearance else None,
+        "management_years": round(sum(management_months) / 12.0, 1) if management_months else None,
+        "people_managed_max": max(team_sizes) if team_sizes else None,
+        "publications_count": len(publications) if publications else None,
+        "availability_weeks": availability_weeks,
         "extraction_notes": notes,
     }
 

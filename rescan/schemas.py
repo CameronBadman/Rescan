@@ -44,10 +44,17 @@ class Identity(BaseModel):
     links: list[str] = Field(default_factory=list)
 
 
+SkillCategory = Literal["technical", "domain", "language", "tool", "soft", "other"]
+Proficiency = Literal["beginner", "intermediate", "advanced", "expert"]
+Seniority = Literal["intern", "graduate", "junior", "mid", "senior", "lead", "principal", "manager", "head", "director", "executive"]
+EmploymentType = Literal["permanent", "contract", "casual", "internship", "freelance", "volunteer", "other"]
+
+
 class Skill(BaseModel):
     name: str
-    category: Literal["technical", "domain", "language", "tool", "soft", "other"] = "other"
+    category: SkillCategory = "other"
     years: float | None = None
+    proficiency: Proficiency | None = Field(default=None, description="Only when the resume states it.")
     evidence: str | None = Field(
         default=None, description="Where in the resume this skill was demonstrated."
     )
@@ -61,6 +68,20 @@ class Experience(BaseModel):
     is_current: bool = False
     months: float | None = None
     summary: str | None = None
+    seniority: Seniority | None = Field(default=None, description="Level implied by the title, e.g. 'Senior Engineer' -> senior.")
+    industry: str | None = Field(default=None, description="Sector of the employer, e.g. 'banking', 'health', 'SaaS'.")
+    employment_type: EmploymentType | None = None
+    team_size: int | None = Field(default=None, description="People managed or led in this role, when stated.")
+    technologies: list[str] = Field(default_factory=list, description="Tools and technologies named for this role.")
+
+
+class Project(BaseModel):
+    """A named piece of work: a side project, an open-source contribution, a thesis."""
+
+    name: str
+    summary: str | None = None
+    technologies: list[str] = Field(default_factory=list)
+    months: float | None = None
 
 
 class Qualification(BaseModel):
@@ -103,6 +124,15 @@ class StructuredResume(BaseModel):
         description="Clubs, societies, memberships. Reviewed for job-relevance when anonymizing.",
     )
     certifications: list[str] = Field(default_factory=list)
+    # Further capability the rule language can query. All of it is lawful to
+    # screen on; none of it is a demographic proxy.
+    projects: list[Project] = Field(default_factory=list)
+    licences: list[str] = Field(default_factory=list, description="Licences held, e.g. driver's, forklift, RN registration.")
+    security_clearance: str | None = Field(default=None, description="Clearance held if stated, e.g. 'Baseline', 'NV1'.")
+    management_years: float | None = Field(default=None, description="Years in roles that managed people.")
+    people_managed_max: int | None = Field(default=None, description="Largest team the candidate reports leading.")
+    publications_count: int | None = None
+    availability_weeks: float | None = Field(default=None, description="Notice period, when stated.")
     extraction_notes: list[str] = Field(default_factory=list)
 
     @property
@@ -141,6 +171,13 @@ class AnonymizedProfile(BaseModel):
     languages: list[str] = Field(default_factory=list)
     job_relevant_affiliations: list[str] = Field(default_factory=list)
     certifications: list[str] = Field(default_factory=list)
+    projects: list[Project] = Field(default_factory=list)
+    licences: list[str] = Field(default_factory=list)
+    security_clearance: str | None = None
+    management_years: float | None = None
+    people_managed_max: int | None = None
+    publications_count: int | None = None
+    availability_weeks: float | None = None
     redactions: list[Redaction] = Field(default_factory=list)
 
     @property

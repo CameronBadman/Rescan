@@ -190,6 +190,22 @@ def anonymize_resume(
     experience = [role.model_copy(deep=True) for role in resume.experience]
     for role in experience:
         role.summary = scrub_text(role.summary, tokens)
+        # The employer name is a prestige proxy and often re-identifies the
+        # candidate; industry and duration carry what the job needs.
+        if role.employer:
+            role.employer = None
+    if any(role.employer for role in resume.experience):
+        qualification_redactions.append(
+            Redaction(
+                field="experience.employer",
+                action="removed",
+                reason="Employer name is an unvalidated prestige proxy; industry, title and duration are kept.",
+            )
+        )
+
+    projects = [project.model_copy(deep=True) for project in resume.projects]
+    for project in projects:
+        project.summary = scrub_text(project.summary, tokens)
 
     redactions = [Redaction(**entry) for entry in data.get("redactions", []) if isinstance(entry, dict)]
     redactions.extend(qualification_redactions)
@@ -207,6 +223,13 @@ def anonymize_resume(
         languages=list(resume.languages),
         job_relevant_affiliations=list(data.get("job_relevant_affiliations") or []),
         certifications=list(resume.certifications),
+        projects=projects,
+        licences=list(resume.licences),
+        security_clearance=resume.security_clearance,
+        management_years=resume.management_years,
+        people_managed_max=resume.people_managed_max,
+        publications_count=resume.publications_count,
+        availability_weeks=resume.availability_weeks,
         redactions=redactions,
     )
 
