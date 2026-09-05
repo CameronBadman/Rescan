@@ -4,6 +4,8 @@
 *.tfstate*
 *.tfplan
 *.auto.tfvars
+*.auto.tfvars.json
+infra/bootstrap/backend.tf
 !*.auto.tfvars.example
 __pycache__/
 .venv/
