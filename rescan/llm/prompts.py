@@ -251,3 +251,100 @@ def anonymize_user_prompt(profile_json: str) -> str:
         "De-identify this candidate profile.\n\n"
         f"<profile>\n{profile_json}\n</profile>"
     )
+
+
+# --------------------------------------------------------------------------
+# Pass 3 — recruiter rule classification and compilation
+# --------------------------------------------------------------------------
+
+CLASSIFY_RULE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["risk", "protected_attributes", "explanation", "suggested_rewrite", "predicate"],
+    "properties": {
+        "risk": {
+            "type": "string",
+            "enum": ["none", "review", "high"],
+            "description": (
+                "'high' if the rule selects on a protected attribute or a proxy for one; "
+                "'review' if lawful only with a documented job-based justification; "
+                "'none' if it tests capability directly."
+            ),
+        },
+        "protected_attributes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Protected attributes the rule engages, e.g. 'age', 'national or ethnic origin'.",
+        },
+        "explanation": _str_or_null(
+            "Why this is or is not a risk, in plain language a recruiter can act on."
+        ),
+        "suggested_rewrite": _str_or_null(
+            "A measurable replacement testing the underlying job requirement. Null if the rule is already sound."
+        ),
+        "predicate": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "required": ["field", "operator", "value", "description"],
+            "description": "How to test the rule against a candidate, or null if it cannot be mechanised.",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "enum": [
+                        "total_years_experience",
+                        "highest_aqf",
+                        "skills",
+                        "languages",
+                        "certifications",
+                        "work_rights_unrestricted",
+                        "work_rights_status",
+                    ],
+                },
+                "operator": {
+                    "type": "string",
+                    "enum": ["gte", "lte", "eq", "contains_all", "contains_any", "in", "is_true", "is_false"],
+                },
+                "value": {
+                    "type": ["number", "string", "boolean", "array", "null"],
+                    "items": {"type": "string"},
+                },
+                "description": {"type": "string"},
+            },
+        },
+    },
+}
+
+CLASSIFY_RULE_SYSTEM = """You review a recruiter's screening rule under Australian
+anti-discrimination law, and where the rule is sound you compile it into a test.
+
+Protected attributes include race, colour, national or ethnic origin, sex,
+sexual orientation, gender identity, age, disability, marital or relationship
+status, pregnancy, family or carer's responsibilities, religion, political
+opinion and social origin.
+
+Judge two things:
+
+1. Risk. A rule is high risk when it selects on a protected attribute or on a
+   proxy for one — a neutral-sounding criterion a protected group is less able
+   to meet and which is not reasonable for the job. It is 'review' when it may
+   be lawful with a documented job-based justification, such as a citizenship
+   requirement for a role needing a security clearance. It is 'none' when it
+   tests a capability the job actually needs.
+
+2. The underlying requirement. When you flag a rule, say what the recruiter
+   most likely needs and express it measurably. Replace 'recent graduate' with a
+   band of years of experience; replace 'native English speaker' with a standard
+   of communication. Never suggest a rewrite that is the same proxy reworded.
+
+Compile a predicate only when the rule tests capability. Never compile a rule
+you rated high risk. Requirements about work rights are lawful and should be
+compiled. Qualification requirements compile to an AQF level: a bachelor degree
+is 7, honours or a graduate certificate or diploma is 8, a masters is 9, a
+doctorate is 10, a diploma is 5.
+
+Return JSON only."""
+
+
+def classify_rule_user_prompt(rule_text: str, role_context: str | None = None) -> str:
+    context = f"\n\nRole context: {role_context}" if role_context else ""
+    return f"Review this screening rule.\n\n<rule>\n{rule_text}\n</rule>{context}"

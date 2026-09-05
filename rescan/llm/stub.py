@@ -531,13 +531,179 @@ def handle_anonymize(request: LLMRequest) -> dict[str, Any]:
     }
 
 
+
 # --------------------------------------------------------------------------
+# Rule compilation
+# --------------------------------------------------------------------------
+
+YEARS_MIN_RE = re.compile(
+    r"\b(?:at least|minimum(?: of)?|min\.?|no less than|>=)\s*(\d{1,2})\s*\+?\s*years?\b"
+    r"|\b(\d{1,2})\s*\+\s*years?\b"
+    r"|\b(\d{1,2})\s*(?:or more)\s*years?\b",
+    re.IGNORECASE,
+)
+YEARS_MAX_RE = re.compile(
+    r"\b(?:no more than|at most|fewer than|less than|under|up to|max(?:imum)?(?: of)?)\s*(\d{1,2})\s*years?\b",
+    re.IGNORECASE,
+)
+DEGREE_RE = re.compile(
+    r"\b(doctorate|phd|masters?|honours|honors|graduate (?:certificate|diploma)"
+    r"|bachelor(?:'?s)?|degree|advanced diploma|diploma|certificate\s*(?:iv|4))\b",
+    re.IGNORECASE,
+)
+DEGREE_TO_AQF = {
+    "doctorate": 10, "phd": 10,
+    "master": 9, "masters": 9,
+    "honours": 8, "honors": 8, "graduate certificate": 8, "graduate diploma": 8,
+    "bachelor": 7, "bachelor's": 7, "degree": 7,
+    "advanced diploma": 6,
+    "diploma": 5,
+}
+WORK_RIGHTS_RE = re.compile(
+    r"\b(full|unrestricted|permanent)\s+work(ing)?\s+rights\b|\bright to work\b|\bwork rights\b"
+    r"|\bno sponsorship\b|\bwithout sponsorship\b",
+    re.IGNORECASE,
+)
+CITIZEN_ONLY_RE = re.compile(r"\baustralian citizens?\b|\bcitizens? only\b", re.IGNORECASE)
+SKILL_LEAD_RE = re.compile(
+    r"\b(?:experience (?:with|in|using)|proficient (?:with|in)|proficiency in|knowledge of"
+    r"|skilled (?:with|in)|hands[- ]on (?:with|experience with)|must know|familiar(?:ity)? with"
+    r"|competent (?:with|in)|background in|expertise in)\b",
+    re.IGNORECASE,
+)
+CERT_RE = re.compile(r"\b(certified|certification|certificate in|accredited)\b", re.IGNORECASE)
+
+# Trailing filler that should not become part of a skill name.
+SKILL_STOPWORDS = re.compile(
+    r"\b(experience|required|preferred|desirable|essential|skills?|a|an|the|is|are|and|or)\b",
+    re.IGNORECASE,
+)
+
+
+def _split_skills(text: str) -> list[str]:
+    text = re.split(r"\.|;", text)[0]
+    parts = re.split(r",|\band\b|\bor\b|/|\+", text, flags=re.IGNORECASE)
+    skills: list[str] = []
+    for part in parts:
+        cleaned = SKILL_STOPWORDS.sub(" ", part)
+        cleaned = re.sub(r"[^\w#+.\- ]", " ", cleaned).strip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        if 1 < len(cleaned) <= 40:
+            skills.append(cleaned)
+    return skills
+
+
+def _first_group(match: re.Match[str]) -> int:
+    return int(next(group for group in match.groups() if group))
+
+
+def compile_predicate(rule_text: str) -> dict[str, Any] | None:
+    """Map a recruiter rule onto the closed predicate vocabulary, or None."""
+    text = rule_text.strip()
+
+    match = YEARS_MIN_RE.search(text)
+    if match:
+        years = _first_group(match)
+        return {
+            "field": "total_years_experience",
+            "operator": "gte",
+            "value": years,
+            "description": f"At least {years} years of professional experience.",
+        }
+
+    match = YEARS_MAX_RE.search(text)
+    if match:
+        years = int(match.group(1))
+        return {
+            "field": "total_years_experience",
+            "operator": "lte",
+            "value": years,
+            "description": f"No more than {years} years of professional experience.",
+        }
+
+    match = DEGREE_RE.search(text)
+    if match:
+        token = match.group(1).lower()
+        # Longest key first so "graduate certificate" beats "certificate".
+        level = next(
+            (aqf for key, aqf in sorted(DEGREE_TO_AQF.items(), key=lambda kv: -len(kv[0])) if key in token),
+            None,
+        )
+        if level is None and token.startswith("certificate"):
+            level = 4
+        if level is not None:
+            return {
+                "field": "highest_aqf",
+                "operator": "gte",
+                "value": level,
+                "description": f"Qualification at AQF level {level} or above (or assessed equivalent).",
+            }
+
+    if CITIZEN_ONLY_RE.search(text):
+        return {
+            "field": "work_rights_status",
+            "operator": "in",
+            "value": ["citizen"],
+            "description": "Australian citizenship.",
+        }
+
+    if WORK_RIGHTS_RE.search(text):
+        return {
+            "field": "work_rights_unrestricted",
+            "operator": "is_true",
+            "value": True,
+            "description": "Holds unrestricted Australian work rights.",
+        }
+
+    match = SKILL_LEAD_RE.search(text)
+    if match:
+        skills = _split_skills(text[match.end():])
+        if skills:
+            operator = "contains_any" if re.search(r"\bor\b", text, re.IGNORECASE) else "contains_all"
+            joiner = " or " if operator == "contains_any" else " and "
+            return {
+                "field": "skills",
+                "operator": operator,
+                "value": skills,
+                "description": f"Demonstrated skill in {joiner.join(skills)}.",
+            }
+
+    if CERT_RE.search(text):
+        skills = _split_skills(CERT_RE.split(text)[-1])
+        if skills:
+            return {
+                "field": "certifications",
+                "operator": "contains_any",
+                "value": skills,
+                "description": f"Holds one of: {', '.join(skills)}.",
+            }
+
+    return None
+
+
+def handle_classify_rule(request: LLMRequest) -> dict[str, Any]:
+    """Compile the rule. Legal risk is decided by the deterministic pattern
+    table in rescan.rules.classifier, which this backend does not second-guess."""
+    rule_text = request.context.get("rule_text", "")
+    if not rule_text.strip():
+        raise LLMError("classify_rule: empty rule text")
+    return {
+        "risk": "none",
+        "protected_attributes": [],
+        "explanation": None,
+        "suggested_rewrite": None,
+        "predicate": compile_predicate(rule_text),
+    }
+
+
+# ------------------------------------------------------------------
 # Dispatch
-# --------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 HANDLERS: dict[str, Callable[[LLMRequest], dict[str, Any]]] = {
     "structure": handle_structure,
     "anonymize": handle_anonymize,
+    "classify_rule": handle_classify_rule,
 }
 
 
