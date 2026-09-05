@@ -16,7 +16,7 @@ public class Security {
   JwtDecoder jwtDecoder() {
     String issuer = Settings.require("AUTH_ISSUER");
     String client = Settings.require("AUTH_CLIENT_ID");
-    var decoder = NimbusJwtDecoder.withJwkSetUri(issuer + "/.well-known/jwks.json").build();
+    var decoder = NimbusJwtDecoder.withJwkSetUri(Settings.get("AUTH_JWKS_URI",issuer + "/.well-known/jwks.json")).build();
     OAuth2TokenValidator<Jwt> clientValidator =
         jwt ->
             client.equals(jwt.getClaimAsString("client_id"))

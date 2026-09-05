@@ -1,26 +1,94 @@
+x-environment: &environment
+  TURSO_DATABASE_URL: http://libsql:8080
+  TURSO_AUTH_TOKEN: ""
+  REDIS_URL: redis://redis:6379
+  S3_BUCKET: rescan-local
+  S3_ENDPOINT: http://s3:4566
+  S3_PUBLIC_ENDPOINT: http://localhost:4566
+  AWS_REGION: ap-southeast-2
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AUTH_ISSUER: http://localhost:9000
+  AUTH_JWKS_URI: http://dev-auth:9000/.well-known/jwks.json
+  AUTH_CLIENT_ID: rescan-local
+  FRONTEND_ORIGIN: http://localhost:5173
 services:
-  postgres:
-    image: postgres:17.6
+  libsql:
+    image: ghcr.io/tursodatabase/libsql-server@sha256:134f3a465ade779e417b258d8e4fbfa8ca0a3212a2dbe83457b2fa104b75d54a
     environment:
-      POSTGRES_DB: rescan
-      POSTGRES_USER: rescan
-      POSTGRES_PASSWORD: local-rescan
-    ports: ["127.0.0.1:5432:5432"]
-    volumes: ["postgres-data:/var/lib/postgresql/data"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rescan"]
-      interval: 5s
-      retries: 10
+      SQLD_HTTP_LISTEN_ADDR: 0.0.0.0:8080
+    ports: ["127.0.0.1:8081:8080"]
+    volumes: ["libsql-data:/var/lib/sqld"]
   redis:
-    image: redis:7.2.10
+    image: docker.io/library/redis:7.2.10
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     ports: ["127.0.0.1:6379:6379"]
     volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
   s3:
-    image: localstack/localstack:4.6.0
-    environment:
-      SERVICES: s3
+    image: docker.io/localstack/localstack:4.6.0
+    environment: {SERVICES: s3}
     ports: ["127.0.0.1:4566:4566"]
+    volumes: ["s3-data:/var/lib/localstack"]
+    healthcheck:
+      test: ["CMD", "awslocal", "s3api", "list-buckets"]
+      interval: 5s
+      retries: 20
+  s3-init:
+    image: docker.io/amazon/aws-cli:2.31.0
+    environment: *environment
+    depends_on:
+      s3: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        aws --endpoint-url http://s3:4566 s3api head-bucket --bucket rescan-local 2>/dev/null || aws --endpoint-url http://s3:4566 s3api create-bucket --bucket rescan-local --create-bucket-configuration LocationConstraint=ap-southeast-2
+        aws --endpoint-url http://s3:4566 s3api put-bucket-versioning --bucket rescan-local --versioning-configuration Status=Enabled
+        aws --endpoint-url http://s3:4566 s3api put-bucket-cors --bucket rescan-local --cors-configuration '{"CORSRules":[{"AllowedOrigins":["http://localhost:5173"],"AllowedMethods":["PUT","GET","HEAD"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag","x-amz-version-id"]}]}'
+  migrate:
+    build: {context: ., target: controller}
+    environment: *environment
+    depends_on: [libsql]
+    command: ["--migrate"]
+    restart: on-failure
+  dev-auth:
+    build: {context: ., target: dev-auth}
+    environment: {DEV_AUTH_BIND: 0.0.0.0}
+    ports: ["127.0.0.1:9000:9000"]
+  api:
+    build: {context: ., target: api}
+    environment: *environment
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      s3-init: {condition: service_completed_successfully}
+      dev-auth: {condition: service_started}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health"]
+      interval: 5s
+      retries: 30
+  controller:
+    build: {context: ., target: controller}
+    environment: *environment
+    depends_on:
+      api: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  worker:
+    build: {context: ., target: worker}
+    environment:
+      <<: *environment
+      OCR_THREADS: "1"
+      OCR_PRELOAD: "true"
+    cpus: 1
+    mem_limit: 4g
+    depends_on:
+      api: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    stop_grace_period: 120s
 volumes:
-  postgres-data:
+  libsql-data:
   redis-data:
+  s3-data:

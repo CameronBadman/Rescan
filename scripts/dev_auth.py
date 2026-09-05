@@ -4,6 +4,7 @@ This is a local testing utility, never part of the API or production containers.
 """
 import base64
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -28,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="rescan-dev-auth-") as directory:
             elif self.path == "/token":
                 now = int(time.time())
                 header = b64(json.dumps({"alg": "RS256", "kid": "local"}).encode())
-                claims = b64(json.dumps({"iss": "http://localhost:9000", "sub": "local-user", "client_id": "rescan-local", "token_use": "access", "iat": now, "exp": now + 3600}).encode())
+                claims = b64(json.dumps({"iss": os.getenv("DEV_AUTH_ISSUER", "http://localhost:9000"), "sub": "local-user", "client_id": "rescan-local", "token_use": "access", "iat": now, "exp": now + 3600}).encode())
                 body = f"{header}.{claims}".encode()
                 signature = subprocess.check_output(["openssl", "dgst", "-sha256", "-sign", str(key)], input=body)
                 response = {"access_token": body.decode() + "." + b64(signature), "expires_in": 3600}
@@ -41,4 +42,4 @@ with tempfile.TemporaryDirectory(prefix="rescan-dev-auth-") as directory:
             self.wfile.write(json.dumps(response).encode())
 
     print("Local token endpoint: http://localhost:9000/token", flush=True)
-    HTTPServer(("127.0.0.1", 9000), Handler).serve_forever()
+    HTTPServer((os.getenv("DEV_AUTH_BIND", "127.0.0.1"), 9000), Handler).serve_forever()

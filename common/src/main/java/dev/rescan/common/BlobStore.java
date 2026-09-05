@@ -22,10 +22,11 @@ public class BlobStore implements AutoCloseable {
             .pathStyleAccessEnabled(!Settings.get("S3_ENDPOINT", "").isBlank())
             .build();
     var cb = S3Client.builder().serviceConfiguration(config);
+    cb.overrideConfiguration(c->c.apiCallTimeout(Duration.ofSeconds(20)).apiCallAttemptTimeout(Duration.ofSeconds(10)));
     var sb = S3Presigner.builder().serviceConfiguration(config);
     if (!Settings.get("S3_ENDPOINT", "").isBlank()) {
       cb.endpointOverride(URI.create(Settings.require("S3_ENDPOINT")));
-      sb.endpointOverride(URI.create(Settings.require("S3_ENDPOINT")));
+      sb.endpointOverride(URI.create(Settings.get("S3_PUBLIC_ENDPOINT",Settings.require("S3_ENDPOINT"))));
     }
     client = cb.build();
     signer = sb.build();
