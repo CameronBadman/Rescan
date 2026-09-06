@@ -295,7 +295,7 @@ def seed(db_path: str | None, flagship: int, batches: int, runs_total: int, seed
     # rest are spread over the smaller intakes, which is what a year of real
     # use looks like.
     run_rows, result_rows = [], []
-    weights = [12 if batch_id == "demo-corpus" else 1 for batch_id, *_ in plans]
+    weights = [4 if batch_id == "demo-corpus" else 1 for batch_id, *_ in plans]
     for number in range(1, runs_total + 1):
         batch_id, batch_name, size, age = rng.choices(plans, weights=weights)[0]
         created = stamp(max(0.1, age * rng.uniform(0.05, 0.95)))
@@ -307,6 +307,7 @@ def seed(db_path: str | None, flagship: int, batches: int, runs_total: int, seed
 
         screening = {}
         scores = []
+        pending = []
         for candidate_id, profile in profiles[batch_id]:
             result = screen(profile, rule_set, None)
             screening[profile.candidate_ref] = result
@@ -319,10 +320,22 @@ def seed(db_path: str | None, flagship: int, batches: int, runs_total: int, seed
             score = _score(rng, profile, rule_set) if result.eligible else None
             if score is not None:
                 scores.append(score)
-            result_rows.append((run_id, candidate_id, profile.candidate_ref, outcome.value,
-                                json.dumps(result.to_dict(), default=str),
-                                score.model_dump_json() if score else None, created))
+            # Seeded rows keep only the outcomes that decided something: at this
+            # scale, storing every passing rule for every run would be a
+            # gigabyte of JSON saying "yes".
+            decided = result.to_dict()
+            decided["outcomes"] = [o for o in decided["outcomes"] if o["passed"] is not True]
+            pending.append((run_id, candidate_id, profile.candidate_ref, outcome.value,
+                            json.dumps(decided, default=str), score, created))
         shortlist = build_shortlist(scores, role, screening=screening)
+        # Only the ranked candidates keep a score breakdown; the rest keep their
+        # outcome. Storing a full breakdown for every person in every seeded run
+        # is half a gigabyte of JSON nobody opens.
+        ranked = {entry.candidate_ref for entry in shortlist.entries} | {
+            entry.candidate_ref for entry in shortlist.below_cutoff[:40]}
+        result_rows.extend(
+            (rid, cid, ref, out, sc_json, score.model_dump_json() if score and ref in ranked else None, at)
+            for rid, cid, ref, out, sc_json, score, at in pending)
         run_rows.append((run_id, batch_id, run_name, RunStatus.COMPLETE.value,
                          role.model_dump_json(), rule_set.model_dump_json(),
                          shortlist.model_dump_json(), None, created, created))

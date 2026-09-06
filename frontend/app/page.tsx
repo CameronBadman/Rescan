@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowUpRight, BarChart3, Check, ChevronDown, CircleHelp, ClipboardCheck, FileCheck2, Filter, Info, Layers3, LockKeyhole, MoreHorizontal, Plus, Search, ShieldCheck, Sparkles, Trash2, Upload, Users, WandSparkles, X } from 'lucide-react'
 import { api, ApiError, API_URL, settled } from '@/lib/api'
-import type { AuditEntry, BatchDetail, BatchSummary, Entry, Identity, Rule, RuleSet, RunDetail, RunSummary, Shortlist } from '@/lib/api'
+import type { AuditEntry, BatchDetail, CandidateDocument, BatchSummary, Entry, Identity, Rule, RuleSet, RunDetail, RunSummary, Shortlist } from '@/lib/api'
 
 type View = 'Overview' | 'Candidates' | 'Analysis runs' | 'Batches' | 'Audit trail'
 
@@ -13,7 +13,7 @@ const navItems: [View, typeof BarChart3][] = [
 
 // One row of the candidate table, built from the run's shortlist sections.
 type Row = {
-  ref: string; score: number | null; status: string; tone: 'good' | 'warn' | 'bad' | 'muted'
+  ref: string; id?: string | null; score: number | null; status: string; tone: 'good' | 'warn' | 'bad' | 'muted'
   evidence: string; section: 'shortlist' | 'below_cutoff' | 'manual_review' | 'excluded'
 }
 
@@ -21,6 +21,7 @@ function rowsFor(shortlist: Shortlist | null): Row[] {
   if (!shortlist) return []
   const scored = (entry: Entry, section: Row['section']): Row => ({
     ref: entry.candidate_ref,
+    id: entry.candidate_id ?? null,
     score: entry.score,
     status: section === 'shortlist' ? (entry.borderline ? 'Borderline' : 'Strong match') : 'Below cutoff',
     tone: section === 'shortlist' ? (entry.borderline ? 'warn' : 'good') : 'muted',
@@ -30,8 +31,8 @@ function rowsFor(shortlist: Shortlist | null): Row[] {
   return [
     ...shortlist.entries.map((e) => scored(e, 'shortlist')),
     ...shortlist.below_cutoff.map((e) => scored(e, 'below_cutoff')),
-    ...shortlist.manual_review.map((m) => ({ ref: m.candidate_ref, score: null, status: 'Review needed', tone: 'warn' as const, evidence: m.reasons[0] || '', section: 'manual_review' as const })),
-    ...shortlist.excluded.map((x) => ({ ref: x.candidate_ref, score: null, status: 'Excluded', tone: 'bad' as const, evidence: x.reasons[0] || x.failed_rules[0] || '', section: 'excluded' as const })),
+    ...shortlist.manual_review.map((m) => ({ ref: m.candidate_ref, id: m.candidate_id ?? null, score: null, status: 'Review needed', tone: 'warn' as const, evidence: m.reasons[0] || '', section: 'manual_review' as const })),
+    ...shortlist.excluded.map((x) => ({ ref: x.candidate_ref, id: x.candidate_id ?? null, score: null, status: 'Excluded', tone: 'bad' as const, evidence: x.reasons[0] || x.failed_rules[0] || '', section: 'excluded' as const })),
   ]
 }
 
@@ -160,6 +161,7 @@ export default function Page() {
   const running = run ? !settled(run.status) : false
 
   // "Review" re-attaches identity: the one place a human sees a name.
+  const [resumeFor, setResumeFor] = useState<Row | null>(null)
   const review = async (ref: string) => {
     if (!runId || identities[ref] !== undefined) return
     const identified = await api.runShortlist(runId, true)
@@ -183,12 +185,13 @@ export default function Page() {
       <div className="mx-auto max-w-[1220px] space-y-7 px-6 py-8 md:px-10">
         {error && <div className="rounded-lg border border-[#e6c3b8] bg-[#fdf1ec] p-3 text-xs text-[#8a4a3d]">{error}</div>}
         {activeNav === 'Overview' && <Overview go={go} run={run} batch={batch} shortlist={shortlist} audit={audit} running={running} roleTitle={roleTitle} onRuleAdded={reload} onNewRun={() => setShowNewRun(true)} hasRuns={runs.length > 0} />}
-        {activeNav === 'Candidates' && <CandidatesView rows={filteredRows} run={run} query={query} setQuery={setQuery} identities={identities} onReview={review} />}
+        {activeNav === 'Candidates' && <CandidatesView rows={filteredRows} run={run} query={query} setQuery={setQuery} identities={identities} onReview={review} onOpenResume={setResumeFor} />}
         {activeNav === 'Analysis runs' && <RunsView runs={runs} runId={runId} onSelect={setRunId} run={run} rules={rules} running={running} roleTitle={roleTitle} onChanged={reload} onNew={() => setShowNewRun(true)} />}
         {activeNav === 'Batches' && <BatchesView batches={batches} onSelectRun={(id) => { setRunId(id); go('Overview') }} onNew={() => setShowNewBatch(true)} onRefresh={reload} />}
         {activeNav === 'Audit trail' && <AuditView audit={audit} rules={rules} run={run} reviewed={Object.keys(identities).length} roleTitle={roleTitle} />}
       </div>
     </section>
+    {resumeFor && <ResumeModal row={resumeFor} name={identities[resumeFor.ref]?.full_name ?? null} onClose={() => setResumeFor(null)} />}
     {showNewRun && <NewRunModal batches={batches} runs={runs} onClose={() => setShowNewRun(false)} onCreated={async (id) => { setShowNewRun(false); await refresh(); setRunId(id); setActiveNav('Overview') }} />}
     {showNewBatch && <NewBatchModal onClose={() => setShowNewBatch(false)} onCreated={async () => { setShowNewBatch(false); await refresh(); setActiveNav('Batches') }} />}
   </main>
@@ -243,11 +246,11 @@ function Overview({ go, run, batch, shortlist, audit, running, roleTitle, onRule
     <section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><div className="flex items-center justify-between"><div><h3 className="font-semibold">Latest activity</h3><p className="mt-1 text-xs text-[#819088]">A traceable record of decisions.</p></div><button onClick={() => go('Audit trail')} className="text-xs font-bold text-[#507663]">View audit trail</button></div><Activity audit={audit} /></section></>
 }
 
-function CandidatesView({ rows, run, query, setQuery, identities, onReview }: any) {
+function CandidatesView({ rows, run, query, setQuery, identities, onReview, onOpenResume }: any) {
   return <><PageHead eyebrow="Candidate workspace" title="Candidates" body="Review anonymized applications, match evidence, and human decisions for the selected analysis run." />
     <div className="rounded-xl border border-[#dfe7e1] bg-white p-6"><div className="flex flex-col justify-between gap-4 md:flex-row md:items-center"><div><h3 className="font-semibold">{run?.screened ?? 0} candidates screened</h3><p className="mt-1 text-xs text-[#819088]">Identities remain hidden until you open a candidate for review.</p></div><div className="flex gap-2"><div className="flex items-center gap-2 rounded-lg bg-[#f5f8f5] px-3 py-2.5"><Search size={16} className="text-[#91a099]" /><input value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search candidates" placeholder="Search candidates" className="w-48 bg-transparent text-xs outline-none" /></div><button className="rounded-lg border border-[#dfe7e1] px-3 text-xs font-semibold"><Filter size={14} /></button></div></div>
       <div className="mt-6 overflow-x-auto"><table className="w-full min-w-[700px] text-left"><thead><tr className="border-b border-[#edf1ed] text-[10px] uppercase tracking-[0.12em] text-[#8a9890]"><th className="pb-3">Candidate</th><th className="pb-3">Match score</th><th className="pb-3">Evidence</th><th className="pb-3">Review state</th><th className="pb-3">Action</th></tr></thead>
-        <tbody>{rows.map((r: Row, i: number) => { const identity = identities[r.ref]; return <tr key={r.ref} className="border-b border-[#edf1ed] last:border-0"><td className="py-4"><div className="flex items-center gap-3"><div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#e7ece8] text-xs font-bold text-[#779083]">{String(i + 1).padStart(2, '0')}</div><div><p className="text-sm font-semibold">{identity?.full_name ?? r.ref}</p><p className="text-xs text-[#8a9890]">{identity ? r.ref : 'anonymized'}</p></div></div></td><td className="py-4">{r.score !== null && <span className="text-lg font-semibold">{Math.round(r.score * 100)}</span>}<span className={`ml-2 rounded-full px-2 py-1 text-[10px] font-semibold ${toneClass[r.tone]}`}>{r.status}</span></td><td className="max-w-md py-4 text-xs text-[#718078]">{r.evidence}</td><td className="py-4 text-xs text-[#718078]">{identity !== undefined ? 'In review' : 'Not reviewed'}</td><td className="py-4"><button onClick={() => onReview(r.ref)} className="rounded-md border border-[#dfe7e1] px-3 py-2 text-xs font-semibold">{identity !== undefined ? 'Reviewing' : 'Review'}</button></td></tr> })}{rows.length === 0 && <tr><td colSpan={5} className="py-8 text-center text-xs text-[#8a9890]">No candidates to show yet.</td></tr>}</tbody></table></div></div></>
+        <tbody>{rows.map((r: Row, i: number) => { const identity = identities[r.ref]; return <tr key={r.ref} className="border-b border-[#edf1ed] last:border-0"><td className="py-4"><div className="flex items-center gap-3"><div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#e7ece8] text-xs font-bold text-[#779083]">{String(i + 1).padStart(2, '0')}</div><div><p className="text-sm font-semibold">{identity?.full_name ?? r.ref}</p><p className="text-xs text-[#8a9890]">{identity ? r.ref : 'anonymized'}</p></div></div></td><td className="py-4">{r.score !== null && <span className="text-lg font-semibold">{Math.round(r.score * 100)}</span>}<span className={`ml-2 rounded-full px-2 py-1 text-[10px] font-semibold ${toneClass[r.tone]}`}>{r.status}</span></td><td className="max-w-md py-4 text-xs text-[#718078]">{r.evidence}</td><td className="py-4 text-xs text-[#718078]">{identity !== undefined ? 'In review' : 'Not reviewed'}</td><td className="py-4"><div className="flex gap-2"><button onClick={() => onReview(r.ref)} className="rounded-md border border-[#dfe7e1] px-3 py-2 text-xs font-semibold">{identity !== undefined ? 'Reviewing' : 'Review'}</button>{r.id && <button onClick={() => { onReview(r.ref); onOpenResume(r) }} className="rounded-md border border-[#dfe7e1] bg-[#f1f6f1] px-3 py-2 text-xs font-semibold">Resume</button>}</div></td></tr> })}{rows.length === 0 && <tr><td colSpan={5} className="py-8 text-center text-xs text-[#8a9890]">No candidates to show yet.</td></tr>}</tbody></table></div></div></>
 }
 
 // The rule checker: plain language in, the legal finding and the compiled
@@ -393,6 +396,43 @@ function Activity({ audit }: { audit: AuditEntry[] }) {
 }
 
 // A batch: resumes only. No role, no plan, no rules.
+// The document behind a candidate. A reviewer who is about to make a decision
+// about a person should be able to read what that person actually submitted.
+function ResumeModal({ row, name, onClose }: { row: Row; name: string | null; onClose: () => void }) {
+  const [state, setState] = useState<{ kind: 'file'; url: string; type: string } | { kind: 'text'; doc: CandidateDocument } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let stale = false
+    let objectUrl: string | null = null
+    if (!row.id) return
+    api.candidateDocument(row.id)
+      .then((result) => { if (stale) return; if (result.kind === 'file') objectUrl = result.url; setState(result) })
+      .catch((exc) => !stale && setError(exc.message))
+    return () => { stale = true; if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [row.id])
+  return <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#19312b]/45 p-4" onClick={onClose}>
+    <div role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} className="flex h-[85vh] w-full max-w-4xl flex-col rounded-2xl border border-[#dfe7e1] bg-[#fbfcfa] shadow-2xl">
+      <div className="flex items-start justify-between border-b border-[#e6ece7] px-6 py-4">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#6c8175]">Submitted document</p>
+          <h3 className="mt-1 text-lg font-semibold">{name ?? row.ref}</h3>
+          <p className="text-xs text-[#8a9890]">{name ? `${row.ref} · ` : ''}{state?.kind === 'text' ? state.doc.filename : 'original file'}</p>
+        </div>
+        <button onClick={onClose} className="rounded-md border border-[#dfe7e1] px-3 py-2 text-xs font-semibold">Close</button>
+      </div>
+      <div className="flex-1 overflow-auto p-6">
+        {error && <p className="text-xs text-[#a4453a]">{error}</p>}
+        {!state && !error && <p className="text-xs text-[#8a9890]">Loading the document…</p>}
+        {state?.kind === 'file' && <iframe title={`${row.ref} resume`} src={state.url} className="h-full w-full rounded-lg border border-[#e6ece7] bg-white" />}
+        {state?.kind === 'text' && <>
+          {state.doc.source === 'profile_summary' && <p className="mb-4 rounded-lg border border-[#e6dcc6] bg-[#fdf8ec] p-3 text-xs text-[#8a7440]">The original file is not stored on this instance, so this is a summary rendered from the structured profile.</p>}
+          <pre className="whitespace-pre-wrap font-mono text-xs leading-5 text-[#33443c]">{state.doc.text}</pre>
+        </>}
+      </div>
+    </div>
+  </div>
+}
+
 function NewBatchModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState('')
   const [source, setSource] = useState<'bucket' | 'upload'>('bucket')

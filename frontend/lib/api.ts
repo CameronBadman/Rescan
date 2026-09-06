@@ -50,9 +50,10 @@ export type RunDetail = {
 
 export type Criterion = { criterion: string; score: number; weight: number; evidence: string }
 export type Identity = { full_name?: string | null; email?: string | null; phone?: string | null } | null
-export type Entry = { rank: number; candidate_ref: string; score: number; rationale: string; borderline: boolean; criteria: Criterion[]; identity?: Identity }
-export type Excluded = { candidate_ref: string; reasons: string[]; failed_rules: string[]; identity?: Identity }
-export type ManualReview = { candidate_ref: string; reasons: string[]; identity?: Identity }
+export type CandidateDocument = { candidate_id: string; candidate_ref: string; filename: string; source: 'extracted' | 'profile_summary'; has_document: boolean; text: string }
+export type Entry = { rank: number; candidate_ref: string; candidate_id?: string | null; score: number; rationale: string; borderline: boolean; criteria: Criterion[]; identity?: Identity }
+export type Excluded = { candidate_ref: string; candidate_id?: string | null; reasons: string[]; failed_rules: string[]; identity?: Identity }
+export type ManualReview = { candidate_ref: string; candidate_id?: string | null; reasons: string[]; identity?: Identity }
 export type Shortlist = { role_title: string; entries: Entry[]; below_cutoff: Entry[]; excluded: Excluded[]; manual_review: ManualReview[] }
 
 export type Finding = {
@@ -118,6 +119,17 @@ export const api = {
     request<Shortlist>(`/runs/${encodeURIComponent(id)}/shortlist?reattach_identity=${reattach}`),
   runAudit: (id: string, includeBatch = true, limit = 500) =>
     request<{ entries: AuditEntry[] }>(`/runs/${encodeURIComponent(id)}/audit?include_batch=${includeBatch}&limit=${limit}`),
+
+  // the document behind a candidate, for a reviewer who opens them
+  candidateDocument: async (candidateId: string): Promise<{ kind: 'file'; url: string; type: string } | { kind: 'text'; doc: CandidateDocument }> => {
+    const headers = new Headers()
+    if (API_KEY) headers.set('X-API-Key', API_KEY)
+    const response = await fetch(`${API_URL}/candidates/${encodeURIComponent(candidateId)}/document`, { headers })
+    if (!response.ok) throw new ApiError(response.status, await response.text())
+    const type = response.headers.get('content-type') || ''
+    if (type.includes('application/json')) return { kind: 'text', doc: await response.json() }
+    return { kind: 'file', url: URL.createObjectURL(await response.blob()), type }
+  },
 
   // rule checking, independent of any run
   checkRules: (rules: string[], roleContext?: string) =>

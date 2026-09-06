@@ -22,9 +22,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any
 
+import mimetypes
+
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from rescan.config import settings
@@ -588,18 +590,92 @@ def run_shortlist(run_id: str, reattach_identity: bool = True) -> dict[str, Any]
     shortlist = run["shortlist"]
     if shortlist is None:
         raise HTTPException(status_code=409, detail=f"run {run_id!r} has no shortlist yet")
-    if not reattach_identity:
-        return shortlist
-
-    identities = {
-        candidate["candidate_ref"]: (candidate.get("structured") or {}).get("identity", {})
-        for candidate in state.store.list_candidates(run["batch_id"])
-        if candidate.get("candidate_ref")
-    }
+    identities = {}
+    candidate_ids = {}
+    for candidate in state.store.list_candidates(run["batch_id"]):
+        ref = candidate.get("candidate_ref")
+        if not ref:
+            continue
+        identities[ref] = (candidate.get("structured") or {}).get("identity", {})
+        candidate_ids[ref] = candidate["id"]
+    # The candidate id is an opaque handle to the document, not identity, so it
+    # is attached either way: a reviewer can open the resume without a name.
     for section in ("entries", "below_cutoff", "excluded", "manual_review"):
         for entry in shortlist.get(section, []):
-            entry["identity"] = identities.get(entry["candidate_ref"])
+            entry["candidate_id"] = candidate_ids.get(entry["candidate_ref"])
+            if reattach_identity:
+                entry["identity"] = identities.get(entry["candidate_ref"])
     return shortlist
+
+
+@app.get("/candidates/{candidate_id}/document")
+def candidate_document(candidate_id: str, format: str = "auto") -> Any:
+    """The resume behind a candidate, for a reviewer who wants to read it.
+
+    `auto` returns the original document when it is still on disk — the PDF the
+    recruiter can read as it was submitted — and falls back to text. `text`
+    always returns text: the extracted document if there is one, otherwise a
+    summary rendered from the profile, so a candidate is never a dead link.
+    """
+    candidate = state.store.get_candidate(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail=f"unknown candidate {candidate_id!r}")
+
+    stored = next((settings.upload_dir / candidate["batch_id"]).glob(f"{candidate_id}*"), None)
+    if format != "text" and stored is not None and stored.is_file():
+        return FileResponse(
+            stored,
+            media_type=mimetypes.guess_type(stored.name)[0] or "application/octet-stream",
+            filename=candidate["filename"],
+            content_disposition_type="inline",
+        )
+
+    extraction = candidate.get("extraction") or {}
+    text = extraction.get("text") or _profile_summary(candidate)
+    return {
+        "candidate_id": candidate_id,
+        "candidate_ref": candidate["candidate_ref"],
+        "filename": candidate["filename"],
+        "source": "extracted" if extraction.get("text") else "profile_summary",
+        "has_document": stored is not None,
+        "text": text,
+    }
+
+
+def _profile_summary(candidate: dict[str, Any]) -> str:
+    """A readable summary of a candidate whose document is no longer on disk."""
+    profile = candidate.get("anonymized") or candidate.get("structured") or {}
+    lines = [f"{candidate.get('candidate_ref') or candidate['id']} — summary rendered from the "
+             "structured profile; the original document is not stored on this instance.", ""]
+    if profile.get("summary"):
+        lines += [profile["summary"], ""]
+    years = profile.get("total_years_experience")
+    if years is not None:
+        lines.append(f"Total experience: {years} years")
+    if profile.get("region"):
+        lines.append(f"Region: {profile['region']}")
+    rights = profile.get("work_rights") or {}
+    if rights.get("status"):
+        lines.append(f"Work rights: {rights['status']}")
+    for label, key in (("Skills", "skills"), ("Certifications", "certifications"),
+                       ("Licences", "licences"), ("Languages", "languages")):
+        values = profile.get(key) or []
+        rendered = [v.get("name", "") if isinstance(v, dict) else str(v) for v in values]
+        if rendered:
+            lines.append(f"{label}: " + ", ".join(filter(None, rendered)))
+    if profile.get("experience"):
+        lines += ["", "Experience:"]
+        for role in profile["experience"]:
+            months = role.get("months")
+            span = f" ({months:.0f} months)" if isinstance(months, (int, float)) else ""
+            lines.append(f"  - {role.get('title') or 'Role'} at {role.get('employer') or 'employer'}{span}")
+            if role.get("summary"):
+                lines.append(f"    {role['summary']}")
+    if profile.get("qualifications"):
+        lines += ["", "Qualifications:"]
+        for qual in profile["qualifications"]:
+            lines.append(f"  - {qual.get('title')} ({qual.get('aqf_label') or 'level unknown'})")
+    return "\n".join(lines)
 
 
 @app.get("/runs/{run_id}/candidates")
