@@ -23,3 +23,16 @@ def extractor() -> Extractor:
 @pytest.fixture(scope="session")
 def llm():
     return build_client("stub")
+
+
+@pytest.fixture(autouse=True)
+def _in_process_mcp(monkeypatch):
+    """Tests run the MCP server in-process unless they opt into remote mode;
+    a developer's .env pointing at a deployment must not redirect them."""
+    import rescan.mcp_server as mcp_module
+    from rescan.config import settings
+
+    monkeypatch.setattr(settings, "mcp_remote_url", "")
+    monkeypatch.setattr(settings, "mcp_remote_key", "")
+    monkeypatch.setattr(mcp_module, "_remote", None)
+    yield

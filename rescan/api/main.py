@@ -399,6 +399,25 @@ def list_jobs(limit: int = 50) -> dict[str, Any]:
     return {"jobs": state.store.list_jobs(limit=limit)}
 
 
+@app.get("/jobs/{job_id}")
+def job_detail(job_id: str) -> dict[str, Any]:
+    """The job record: role, status, timestamps, whether a shortlist exists."""
+    job = _require_job(job_id)
+    counts = state.store.status_counts(job_id)
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "role": job["role"],
+        "created_at": job["created_at"],
+        "updated_at": job["updated_at"],
+        "error": job["error"],
+        "has_shortlist": job["shortlist"] is not None,
+        "has_rules": job["rules"] is not None,
+        "counts": counts,
+        "total": sum(counts.values()),
+    }
+
+
 @app.get("/jobs/{job_id}/status", response_model=JobStatusResponse)
 def job_status(job_id: str) -> JobStatusResponse:
     """Poll target for a progress view: per-status counts as they change."""

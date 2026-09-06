@@ -58,7 +58,7 @@ locals {
       RESCAN_S3_PREFIX              = var.prefix
       # Two keys: one for agents/MCP, one for the frontend, rotatable apart.
       RESCAN_API_KEYS         = "${random_password.api_key.result},${random_password.frontend_key.result}"
-      RESCAN_CORS_ORIGINS     = join(",", var.frontend_origins)
+      RESCAN_CORS_ORIGINS     = join(",", concat(var.frontend_origins, var.deploy_api ? ["https://${aws_cloudfront_distribution.frontend[0].domain_name}"] : []))
       RESCAN_PIPELINE_WORKERS = "2"
     },
     var.llm_settings,

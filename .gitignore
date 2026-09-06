@@ -25,3 +25,10 @@ infra/**/.terraform/
 infra/bootstrap/backend.tf
 !*.auto.tfvars.example
 benchmark-results/
+# frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env
+frontend/.env.local
+frontend/next-env.d.ts
