@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -81,6 +82,19 @@ app = FastAPI(
 )
 
 
+# The frontend is a separate app on its own origin. CORS is added before the
+# auth middleware so a preflight (which carries no key) is answered by the
+# browser handshake rather than rejected with a 401.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "X-API-Key", "Content-Type"],
+    allow_credentials=False,
+    max_age=600,
+)
+
+
 # --------------------------------------------------------------------------
 # Authentication
 # --------------------------------------------------------------------------
@@ -104,7 +118,7 @@ async def require_api_key(request: Request, call_next):
     default check across every route rather than a per-endpoint dependency that
     a new endpoint could forget to declare.
     """
-    if not settings.api_keys or request.url.path in PUBLIC_PATHS:
+    if not settings.api_keys or request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
         return await call_next(request)
 
     presented = _presented_key(request)

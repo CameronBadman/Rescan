@@ -35,6 +35,12 @@ variable "extra_env" {
   default     = {}
 }
 
+variable "frontend_origins" {
+  description = "Browser origins allowed to call the API (CORS). Local dev servers plus the deployed frontend."
+  type        = list(string)
+  default     = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000"]
+}
+
 locals {
   api_count    = var.deploy_api ? 1 : 0
   artifact_key = "rescan.zip"
@@ -50,8 +56,10 @@ locals {
       RESCAN_S3_BUCKET              = aws_s3_bucket.resumes.bucket
       RESCAN_S3_REGION              = var.region
       RESCAN_S3_PREFIX              = var.prefix
-      RESCAN_API_KEYS               = random_password.api_key.result
-      RESCAN_PIPELINE_WORKERS       = "2"
+      # Two keys: one for agents/MCP, one for the frontend, rotatable apart.
+      RESCAN_API_KEYS         = "${random_password.api_key.result},${random_password.frontend_key.result}"
+      RESCAN_CORS_ORIGINS     = join(",", var.frontend_origins)
+      RESCAN_PIPELINE_WORKERS = "2"
     },
     var.llm_settings,
     var.extra_env,
@@ -59,6 +67,11 @@ locals {
 }
 
 resource "random_password" "api_key" {
+  length  = 40
+  special = false
+}
+
+resource "random_password" "frontend_key" {
   length  = 40
   special = false
 }
@@ -298,6 +311,15 @@ output "api" {
 output "api_key" {
   sensitive = true
   value     = random_password.api_key.result
+}
+
+output "frontend_env" {
+  description = "For the frontend's environment: the API base URL and its own key."
+  sensitive   = true
+  value = var.deploy_api ? join("\n", [
+    "NEXT_PUBLIC_RESCAN_API_URL=https://${aws_cloudfront_distribution.api[0].domain_name}",
+    "NEXT_PUBLIC_RESCAN_API_KEY=${random_password.frontend_key.result}",
+  ]) : ""
 }
 
 output "mcp_env" {

@@ -81,3 +81,41 @@ def test_api_keys_accept_csv_and_json(monkeypatch, raw, expected):
 def test_ensemble_models_accept_csv(monkeypatch):
     monkeypatch.setenv("RESCAN_ENSEMBLE_MODELS", "m1,m2,m3")
     assert Settings().ensemble_models == ["m1", "m2", "m3"]
+
+
+# --------------------------------------------------------------------------
+# CORS for the browser frontend
+# --------------------------------------------------------------------------
+
+
+def test_preflight_from_an_allowed_origin_succeeds_without_a_key(secured):
+    response = secured.options(
+        "/rules/compile",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "x-api-key,content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "x-api-key" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_actual_request_still_needs_the_key_and_gets_cors_headers(secured):
+    denied = secured.get("/jobs", headers={"Origin": "http://localhost:3000"})
+    assert denied.status_code == 401
+    allowed = secured.get("/jobs", headers={"Origin": "http://localhost:3000", "X-API-Key": KEY})
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_unlisted_origin_gets_no_cors_headers(secured):
+    response = secured.get("/jobs", headers={"Origin": "https://evil.example", "X-API-Key": KEY})
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_origins_accept_csv(monkeypatch):
+    monkeypatch.setenv("RESCAN_CORS_ORIGINS", "https://app.example, http://localhost:3000")
+    assert Settings().cors_origins == ["https://app.example", "http://localhost:3000"]

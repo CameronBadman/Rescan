@@ -101,7 +101,16 @@ class Settings(BaseSettings):
     # only; the API logs a warning at startup when it is left empty.
     api_keys: Annotated[list[str], NoDecode] = []
 
-    @field_validator("api_keys", "ensemble_models", mode="before")
+    # Browser origins allowed to call the API (the frontend). Comma-separated.
+    # Local dev servers are allowed by default; add the deployed frontend's
+    # origin in production. The API key is still required on every request.
+    cors_origins: Annotated[list[str], NoDecode] = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+    ]
+
+    @field_validator("api_keys", "ensemble_models", "cors_origins", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
         """Accept comma-separated env values as well as JSON lists.
