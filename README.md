@@ -259,6 +259,23 @@ each, never identity. Queries pass the same legal gate as rules and are written
 to the audit trail, because a query that never formally excludes anyone still
 shapes who gets looked at.
 
+## Frontend
+
+`frontend/` is the recruiter workspace (Next.js, static export) connected to
+the API: a round selector from `/jobs`, overview tiles and the pipeline from
+`/status` and `/shortlist`, the candidate table from the shortlist's four
+sections — identity is fetched only when a reviewer opens a candidate — the
+rule checker from `/rules/check` with the statute and rewrite, the compiled
+rules and the model's reasoning from `/rules`, the audit trail from `/audit`,
+and a new round through `/jobs/from-bucket` or an upload with a plain-language
+plan. It carries its own API key (rotatable apart from the agent key), and
+the API's CORS list includes its origin.
+
+```bash
+cd frontend && cp .env.example .env && npm install && npm run dev   # against a local API
+./scripts/deploy_frontend.sh   # build against the deployment and publish to CloudFront
+```
+
 ## Where the resumes come from
 
 There are two intake paths. **The batch ingestion service** in `api/`,
@@ -347,6 +364,8 @@ Sydney that bootstraps from a source archive in a private artifacts bucket
 box, no SSH — SSM instead), behind CloudFront for HTTPS on its own domain.
 `./scripts/deploy_aws.sh` archives HEAD, uploads it and refreshes the
 instance; `terraform output -raw mcp_env >> .env` points the MCP server at it.
+The frontend is a static export in its own bucket behind its own CloudFront
+distribution (`./scripts/deploy_frontend.sh`).
 Inference is whatever `llm_settings` says — the stub until a GPU is up, then
 the RunPod pod URLs.
 
