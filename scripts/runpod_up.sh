@@ -38,7 +38,18 @@ BULK_MODEL="Qwen/Qwen3.8-27B"
 BIG_MODEL="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
 mkdir -p .runpod
 
-json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+# Parse runpodctl's JSON; an {"error": ...} body or empty output is fatal.
+json() {
+  python3 -c "
+import json, sys
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit('runpodctl returned no output')
+d = json.loads(raw)
+if isinstance(d, dict) and d.get('error'):
+    sys.exit('runpodctl: ' + str(d['error']))
+print($1)"
+}
 
 # volume <name> <size_gb> -> prints the volume id, creating it if needed
 volume() {
@@ -46,8 +57,9 @@ volume() {
   id="$(runpodctl network-volume list -o json 2>/dev/null | json "next((v['id'] for v in (d if isinstance(d, list) else d.get('networkVolumes', d.get('data', []))) if v.get('name')=='$name'), '')")"
   if [ -z "$id" ]; then
     echo "creating network volume $name (${size} GB, $DC)" >&2
-    id="$(runpodctl network-volume create --name "$name" --size "$size" --data-center-id "$DC" -o json | json "d.get('id') or d.get('networkVolume',{}).get('id')")"
+    id="$(runpodctl network-volume create --name "$name" --size "$size" --data-center-id "$DC" -o json | json "d.get('id') or d.get('networkVolume',{}).get('id')")" || exit 1
   fi
+  [ -n "$id" ] || { echo "no network volume id for $name; not creating a pod without one" >&2; exit 1; }
   echo "$id"
 }
 
@@ -55,23 +67,24 @@ volume() {
 pod() {
   local key="$1" model="$2" gpu="$3" count="$4" vol_gb="$5"; shift 5
   local vol_id args env id
-  vol_id="$(volume "rescan-$key-weights" "$vol_gb")"
+  vol_id="$(volume "rescan-$key-weights" "$vol_gb")" || exit 1
   args="--model $model --served-model-name $model --host 0.0.0.0 --port 8000 --tensor-parallel-size $count --max-model-len $MAX_LEN --gpu-memory-utilization 0.92 --limit-mm-per-prompt image=0,video=0 $*"
   env="$(python3 -c "import json; print(json.dumps({'HF_HOME': '/workspace/huggingface', 'HF_HUB_ENABLE_HF_TRANSFER': '1', 'VLLM_API_KEY': '$VLLM_API_KEY', 'VLLM_USE_V1': '1'}))")"
   echo "creating pod rescan-$key: $count x $gpu, $model" >&2
   id="$(runpodctl pod create --name "rescan-$key" --image "$IMAGE" --gpu-id "$gpu" --gpu-count "$count" \
         --cloud-type SECURE --data-center-ids "$DC" --container-disk-in-gb 40 \
         --network-volume-id "$vol_id" --volume-mount-path /workspace --ports "8000/http" \
-        --env "$env" --docker-args "$args" --ssh=false -o json | json "d.get('id') or d.get('pod',{}).get('id')")"
+        --env "$env" --docker-args "$args" --ssh=false -o json | json "d.get('id') or d.get('pod',{}).get('id')")" || exit 1
+  [ -n "$id" ] || { echo "pod create returned no id" >&2; exit 1; }
   echo "$id"
 }
 
 bulk_id=""; big_id=""
 case "$SHAPE" in
-  two)   bulk_id="$(pod bulk "$BULK_MODEL" "$BULK_GPU" 1 80 --max-num-seqs 32 --reasoning-parser qwen3)"
-         big_id="$(pod compile "$BIG_MODEL" "$BIG_GPU" "$BIG_GPU_COUNT" 300 --max-num-seqs 8)" ;;
-  big)   big_id="$(pod compile "$BIG_MODEL" "$BIG_GPU" "$BIG_GPU_COUNT" 300 --max-num-seqs 16)" ;;
-  small) bulk_id="$(pod bulk "$BULK_MODEL" "$BULK_GPU" 1 80 --max-num-seqs 32 --reasoning-parser qwen3)" ;;
+  two)   bulk_id="$(pod bulk "$BULK_MODEL" "$BULK_GPU" 1 80 --max-num-seqs 32 --reasoning-parser qwen3)" || exit 1
+         big_id="$(pod compile "$BIG_MODEL" "$BIG_GPU" "$BIG_GPU_COUNT" 300 --max-num-seqs 8)" || exit 1 ;;
+  big)   big_id="$(pod compile "$BIG_MODEL" "$BIG_GPU" "$BIG_GPU_COUNT" 300 --max-num-seqs 16)" || exit 1 ;;
+  small) bulk_id="$(pod bulk "$BULK_MODEL" "$BULK_GPU" 1 80 --max-num-seqs 32 --reasoning-parser qwen3)" || exit 1 ;;
   *) echo "SHAPE must be two, big or small" >&2; exit 2 ;;
 esac
 
@@ -84,7 +97,7 @@ llm_url="${bulk_url:-$big_url}"; llm_model="$([ -n "$bulk_id" ] && echo "$BULK_M
 python3 - "$bulk_id" "$big_id" <<'EOF'
 import json, sys, datetime
 bulk, big = sys.argv[1], sys.argv[2]
-json.dump({"created": datetime.datetime.utcnow().isoformat(), "pods": {k: v for k, v in {"bulk": bulk, "compile": big}.items() if v}},
+json.dump({"created": datetime.datetime.now(datetime.timezone.utc).isoformat(), "pods": {k: v for k, v in {"bulk": bulk, "compile": big}.items() if v}},
           open(".runpod/pods.json", "w"), indent=2)
 EOF
 
