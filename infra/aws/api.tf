@@ -240,6 +240,12 @@ resource "aws_instance" "api" {
     http_tokens = "required"
   }
 
+  # The AMI lookup tracks the latest AL2023 release; an AMI change would
+  # replace the instance and lose its job store. Rebuild deliberately instead.
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
     artifacts_bucket = aws_s3_bucket.artifacts[0].bucket
     artifact_key     = local.artifact_key
