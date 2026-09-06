@@ -243,7 +243,7 @@ resource "aws_instance" "api" {
   # The AMI lookup tracks the latest AL2023 release; an AMI change would
   # replace the instance and lose its job store. Rebuild deliberately instead.
   lifecycle {
-    ignore_changes = [ami]
+    ignore_changes = [ami, user_data]
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
