@@ -57,8 +57,8 @@ locals {
       RESCAN_S3_REGION              = var.region
       RESCAN_S3_PREFIX              = var.prefix
       # Two keys: one for agents/MCP, one for the frontend, rotatable apart.
-      RESCAN_API_KEYS         = "${random_password.api_key.result},${random_password.frontend_key.result}"
-      RESCAN_CORS_ORIGINS     = join(",", concat(var.frontend_origins, var.deploy_api ? ["https://${aws_cloudfront_distribution.frontend[0].domain_name}"] : []))
+      RESCAN_API_KEYS     = "${random_password.api_key.result},${random_password.frontend_key.result}"
+      RESCAN_CORS_ORIGINS = join(",", concat(var.frontend_origins, var.deploy_api ? ["https://${aws_cloudfront_distribution.frontend[0].domain_name}"] : [], local.domain_origins))
       # Candidates processed concurrently. Each is a few sequential model
       # calls, so this is what keeps vLLM's continuous batching fed.
       RESCAN_PIPELINE_WORKERS = "12"
@@ -331,7 +331,7 @@ output "frontend_env" {
   description = "For the frontend's environment: the API base URL and its own key."
   sensitive   = true
   value = var.deploy_api ? join("\n", [
-    "NEXT_PUBLIC_RESCAN_API_URL=https://${aws_cloudfront_distribution.api[0].domain_name}",
+    "NEXT_PUBLIC_RESCAN_API_URL=${local.aliases_ready ? "https://${local.api_hostname}" : "https://${aws_cloudfront_distribution.api[0].domain_name}"}",
     "NEXT_PUBLIC_RESCAN_API_KEY=${random_password.frontend_key.result}",
   ]) : ""
 }
@@ -340,7 +340,7 @@ output "mcp_env" {
   description = "Environment for running the MCP server against the deployed API."
   sensitive   = true
   value = var.deploy_api ? join("\n", [
-    "RESCAN_MCP_REMOTE_URL=https://${aws_cloudfront_distribution.api[0].domain_name}",
+    "RESCAN_MCP_REMOTE_URL=${local.aliases_ready ? "https://${local.api_hostname}" : "https://${aws_cloudfront_distribution.api[0].domain_name}"}",
     "RESCAN_MCP_REMOTE_KEY=${random_password.api_key.result}",
   ]) : ""
 }
