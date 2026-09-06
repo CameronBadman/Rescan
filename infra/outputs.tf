@@ -1,0 +1,10 @@
+output "api_url" { value = "https://${var.api_domain}" }
+output "controller_function" { value = aws_lambda_function.controller.function_name }
+output "api_function" { value = aws_lambda_function.api.function_name }
+output "cognito_client_id" { value = aws_cognito_user_pool_client.frontend.id }
+output "cognito_issuer" { value = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.main.id}" }
+output "cognito_login_domain" { value = "https://${aws_cognito_user_pool_domain.main.domain}.auth.${var.region}.amazoncognito.com" }
+output "cluster" { value = aws_ecs_cluster.main.name }
+output "worker_service" { value = aws_ecs_service.worker.name }
+output "bucket" { value = aws_s3_bucket.documents.id }
+output "alarm_topic_arn" { value = aws_sns_topic.alarms.arn }

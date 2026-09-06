@@ -1,0 +1,30 @@
+name: demo worker session
+on:
+  workflow_dispatch:
+    inputs:
+      enabled:
+        description: Warm one worker for two hours; false ends the warm minimum
+        type: boolean
+        default: true
+permissions: {contents: read, id-token: write}
+concurrency:
+  group: rescan-demo-session
+  cancel-in-progress: false
+jobs:
+  session:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    environment: demo
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEMO_ROLE_ARN }}
+          aws-region: ap-southeast-2
+      - env:
+          ENABLED: ${{ inputs.enabled }}
+          CONTROLLER: ${{ vars.CONTROLLER_FUNCTION }}
+        run: |
+          PAYLOAD=$(jq -n --argjson enabled "$ENABLED" '{action:"warm",enabled:$enabled}')
+          aws lambda invoke --function-name "$CONTROLLER" --cli-binary-format raw-in-base64-out --payload "$PAYLOAD" /tmp/demo.json > /tmp/invoke.json
+          test "$(jq -r '.FunctionError // empty' /tmp/invoke.json)" = ""
+          cat /tmp/demo.json

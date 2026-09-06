@@ -1,0 +1,115 @@
+name: deploy approved release
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Immutable release ID from publish workflow
+        required: true
+        type: string
+      activate:
+        description: Enable processing after migrations and acceptance checks
+        default: false
+        type: boolean
+      worker_profile_verified:
+        description: The small worker's memory and OCR benchmark has passed
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: rescan-production-deploy
+  cancel-in-progress: false
+env:
+  AWS_REGION: ap-southeast-2
+  ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+  STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+  RELEASE_ID: ${{ inputs.release_id }}
+  TF_VAR_region: ap-southeast-2
+  TF_VAR_name: ${{ vars.RESOURCE_NAME }}
+  TF_VAR_api_domain: ${{ vars.API_DOMAIN }}
+  TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+  TF_VAR_frontend_origin: ${{ vars.FRONTEND_ORIGIN }}
+  TF_VAR_auth_callback_url: ${{ vars.AUTH_CALLBACK_URL }}
+  TF_VAR_turso_database_url: ${{ vars.TURSO_DATABASE_URL }}
+  TF_VAR_turso_secret_arn: ${{ vars.TURSO_SECRET_ARN }}
+  TF_VAR_redis_secret_arn: ${{ vars.REDIS_SECRET_ARN }}
+  TF_VAR_operations_email: ${{ vars.OPERATIONS_EMAIL }}
+  TF_VAR_controller_enabled: ${{ inputs.activate }}
+  TF_VAR_worker_profile_verified: ${{ inputs.worker_profile_verified }}
+jobs:
+  plan:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    environment: production-plan
+    permissions: {contents: read, id-token: write}
+    outputs:
+      checksum: ${{ steps.plan.outputs.checksum }}
+      source: ${{ steps.manifest.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: hashicorp/setup-terraform@v3
+        with: {terraform_version: 1.12.2, terraform_wrapper: false}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ap-southeast-2
+      - name: Resolve immutable release
+        id: manifest
+        run: |
+          [[ "$RELEASE_ID" =~ ^[a-f0-9]{40}-[0-9]+-[0-9]+$ ]]
+          aws s3 cp "s3://$ARTIFACT_BUCKET/releases/$RELEASE_ID/manifest.json" /tmp/release.json
+          SOURCE=$(jq -r .commit /tmp/release.json)
+          [[ "$SOURCE" =~ ^[a-f0-9]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE" "$GITHUB_SHA"
+          echo "source=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: Prepare Terraform inputs
+        run: bash scripts/prepare-release.sh
+      - name: Require a successful migration before activation
+        if: inputs.activate
+        run: |
+          DB_SHA=$(printf '%s' "$TF_VAR_turso_database_url" | sha256sum | cut -d ' ' -f1)
+          SCHEMA_SHA=$(sha256sum common/src/main/resources/db/turso/V1.sql | cut -d ' ' -f1)
+          aws s3 cp "s3://$ARTIFACT_BUCKET/installations/$TF_VAR_name/$DB_SHA/$SCHEMA_SHA.json" /tmp/migration-marker.json
+          jq -e '.migrated == true' /tmp/migration-marker.json
+      - name: Plan without exposing sensitive values in logs
+        id: plan
+        run: |
+          terraform -chdir=infra init -backend-config="bucket=$STATE_BUCKET" -backend-config=key=production/terraform.tfstate -backend-config=region=ap-southeast-2 -backend-config=encrypt=true -backend-config=use_lockfile=true
+          terraform -chdir=infra plan -out=deployment.tfplan > /tmp/terraform-plan.log
+          sha256sum infra/deployment.tfplan | cut -d ' ' -f1 | xargs -I{} echo 'checksum={}' >> "$GITHUB_OUTPUT"
+          aws s3 cp infra/deployment.tfplan "s3://$ARTIFACT_BUCKET/plans/$GITHUB_RUN_ID/deployment.tfplan" --sse AES256
+          aws s3 cp /tmp/terraform-plan.log "s3://$ARTIFACT_BUCKET/plans/$GITHUB_RUN_ID/review.txt" --sse AES256
+          echo "Review the saved plan at s3://$ARTIFACT_BUCKET/plans/$GITHUB_RUN_ID/review.txt before approval." >> "$GITHUB_STEP_SUMMARY"
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: production
+    permissions: {contents: read, id-token: write}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ needs.plan.outputs.source }}'}
+      - uses: hashicorp/setup-terraform@v3
+        with: {terraform_version: 1.12.2, terraform_wrapper: false}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ap-southeast-2
+      - run: bash scripts/prepare-release.sh
+      - name: Apply exactly the reviewed plan
+        env:
+          PLAN_SHA: ${{ needs.plan.outputs.checksum }}
+        run: |
+          terraform -chdir=infra init -backend-config="bucket=$STATE_BUCKET" -backend-config=key=production/terraform.tfstate -backend-config=region=ap-southeast-2 -backend-config=encrypt=true -backend-config=use_lockfile=true
+          aws s3 cp "s3://$ARTIFACT_BUCKET/plans/$GITHUB_RUN_ID/deployment.tfplan" infra/deployment.tfplan
+          echo "$PLAN_SHA  infra/deployment.tfplan" | sha256sum --check
+          terraform -chdir=infra apply deployment.tfplan > /tmp/terraform-apply.log
+          CONTROLLER=$(terraform -chdir=infra output -raw controller_function)
+          aws lambda invoke --function-name "$CONTROLLER" --cli-binary-format raw-in-base64-out --payload '{"action":"migrate"}' /tmp/migrate.json > /tmp/invoke.json
+          test "$(jq -r '.FunctionError // empty' /tmp/invoke.json)" = ""
+          jq -e '.migrated == true' /tmp/migrate.json
+          curl --retry 10 --retry-all-errors --retry-delay 3 -fsS "https://$TF_VAR_api_domain/actuator/health"
+          DB_SHA=$(printf '%s' "$TF_VAR_turso_database_url" | sha256sum | cut -d ' ' -f1)
+          SCHEMA_SHA=$(sha256sum common/src/main/resources/db/turso/V1.sql | cut -d ' ' -f1)
+          aws s3 cp /tmp/migrate.json "s3://$ARTIFACT_BUCKET/installations/$TF_VAR_name/$DB_SHA/$SCHEMA_SHA.json" --sse AES256
+          echo "Deployment completed. Run authenticated acceptance tests before enabling demo traffic." >> "$GITHUB_STEP_SUMMARY"

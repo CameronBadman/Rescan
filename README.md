@@ -261,6 +261,16 @@ shapes who gets looked at.
 
 ## Where the resumes come from
 
+There are two intake paths. **The batch ingestion service** in `api/`,
+`common/`, `controller/` and `worker/` (Java; Turso, Redis Streams, Fargate
+workers with Tika + TrOCR) is the front door for 1–4,000-file uploads with
+Cognito auth, resumable verification and per-document OCR; it writes one JSON
+per document (`docs/result.schema.json`) to S3. See
+[docs/batch-ingestion.md](docs/batch-ingestion.md) for its API, deployment and
+operations. The Python pipeline below then consumes documents from the bucket
+— today raw resumes under `jobs/<jobId>/`, extracted here; next, the
+ingestion service's result JSON with extraction already done.
+
 Resumes for a hiring round live in an S3-compatible bucket under
 `<prefix>/<jobId>/` — MinIO, Cloudflare R2 or AWS all work, through boto3 with
 path-style addressing. `POST /jobs/from-bucket {"job_id": "round-7", "role":

@@ -14,3 +14,14 @@ infra/**/.terraform/
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+
+# --- batch ingestion service (Java, Turso, worker) ---
+**/target/
+.terraform/
+*.tfstate*
+*.tfplan
+*.auto.tfvars
+*.auto.tfvars.json
+infra/bootstrap/backend.tf
+!*.auto.tfvars.example
+benchmark-results/

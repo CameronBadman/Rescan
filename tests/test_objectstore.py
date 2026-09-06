@@ -134,6 +134,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "upload_dir", tmp_path / "uploads")
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "local_object_store_dir", tmp_path / "bucket")
+    # A developer's .env may point at a real bucket; these tests never should.
+    monkeypatch.setattr(settings, "object_store", "local")
     with TestClient(app) as test_client:
         yield test_client
 
