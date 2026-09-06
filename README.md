@@ -383,7 +383,14 @@ Verified in development:
   (parser, three-valued evaluation, aggregates, the judge), plan compilation,
   queries, bucket ingestion against moto's S3, and the inference client
   against scripted servers.
-- **The real inference path was exercised against a real open model** —
+- **Every pass verified against Qwen3.8-27B on vLLM** (RunPod, 1× H100,
+  `scripts/smoke_real_model.py`): structuring 28 s, anonymization 7 s, plan
+  compilation 51 s — the model wrote seven valid clauses from the demo plan
+  with its reasoning, and the native-speaker and recent-graduate proxies were
+  flagged and never applied — the judge returned an evidence-verified answer,
+  ranking scored the plan's PREFER clauses, and a four-document job ran end
+  to end. Structured output negotiated as `json_schema` on the first try.
+- The inference client was first exercised against a tiny open model —
   Qwen3-0.6B on a local llama.cpp server, CPU only. Structured-output
   negotiation lands on an enforcing style, thinking control is honoured, and
   structuring, anonymization, the judge and ranking each returned
@@ -399,13 +406,8 @@ Verified in development:
 
 Not yet verified:
 
-- **No run against Qwen3.8-27B.** No GPU was available. The 0.6B model used
-  to exercise the client is far too small to judge quality: it could not keep
-  the compile pass's reasoning within an 8k-token budget, so **plan
-  compilation has not completed against any real model**, and how well the
-  27B writes the rule language — and how often the repair round fires — is
-  unmeasured. The bias audit has no real result yet. Run
-  `python -m scripts.smoke_real_model` against the served 27B first.
+- **The bias audit has no real result yet.** Run `python -m rescan.audit.run`
+  against the served model.
 - **Deployed and verified live on AWS**: the API runs at a CloudFront URL in
   front of the Sydney instance; with the API key it compiled the demo plan,
   pulled the 12 demo documents from the real bucket through the instance
