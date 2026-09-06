@@ -153,3 +153,18 @@ def test_editing_one_run_leaves_the_other_alone(client, batch, run):
     assert len(client.get(f"/runs/{other}/rules").json()["rules"]) < len(
         client.get(f"/runs/{run}/rules").json()["rules"]
     )
+
+
+def test_a_known_proxy_is_refused_without_calling_the_model(client, run, monkeypatch):
+    """The statute table is authoritative, so the recruiter waits on nothing."""
+    from rescan.api.main import state
+
+    def boom(request):
+        raise AssertionError("no model call should be needed to refuse a known proxy")
+
+    monkeypatch.setattr(state.runner.client, "json_call", boom)
+    response = client.post(f"/runs/{run}/rules", json={"text": "Must be a recent graduate"})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["rule"]["findings"][0]["pattern_id"] == "recent_graduate"
+    assert any("Age Discrimination Act" in s for s in detail["rule"]["findings"][0]["statutes"])

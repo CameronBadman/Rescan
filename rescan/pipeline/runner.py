@@ -34,9 +34,9 @@ from rescan.pipeline.anonymize import AnonymizationError, anonymize_resume
 from rescan.pipeline.ensemble import ensemble_pass
 from rescan.pipeline.rank import borderline_refs, build_shortlist, criteria_for, triage_rank
 from rescan.pipeline.structure import StructuringError, structure_resume
-from rescan.rules.classifier import classify_rule, compile_plan
+from rescan.rules.classifier import classify_rule, compile_plan, scan_patterns
 from rescan.rules.engine import ScreeningResult, screen
-from rescan.rules.models import ClassifiedRule, RuleSet
+from rescan.rules.models import ClassifiedRule, RuleSet, RuleVerdict
 from rescan.rules.statutes import RiskLevel
 from rescan.schemas import (
     AnonymizedProfile,
@@ -430,7 +430,22 @@ class PipelineRunner:
         index = len(rule_set.rules) + 1
         while f"rule_{index}" in taken:
             index += 1
-        rule = classify_rule(text, self.client, role_context=role.title, rule_id=f"rule_{index}")
+        rule_id = f"rule_{index}"
+
+        # The statute table is authoritative and needs no model. A rule it
+        # already rates high risk is refused here, so the recruiter gets the
+        # finding and the rewrite immediately instead of waiting on inference
+        # for an answer that could not change.
+        findings = scan_patterns(text)
+        blocking = [f for f in findings if f.risk is RiskLevel.HIGH]
+        if blocking:
+            rule = ClassifiedRule(
+                id=rule_id, source_text=text.strip(), verdict=RuleVerdict.RISKY,
+                risk=RiskLevel.HIGH, findings=findings,
+                notes=["Refused by the known-phrasings table before any model call."],
+            )
+        else:
+            rule = classify_rule(text, self.client, role_context=role.title, rule_id=rule_id)
         if rule.risk is RiskLevel.HIGH:
             self.store.audit(
                 run["batch_id"], "rules", "rule_rejected",
