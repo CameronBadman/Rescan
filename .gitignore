@@ -32,3 +32,6 @@ frontend/out/
 frontend/.env
 frontend/.env.local
 frontend/next-env.d.ts
+
+# runpod cli state
+.runpod/

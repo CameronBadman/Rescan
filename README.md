@@ -104,7 +104,10 @@ RESCAN_LLM_BACKEND=openai RESCAN_LLM_BASE_URL=http://gpu-host:8000/v1 \
 
 `GET /health/llm` reports the same reachability and negotiated style live.
 
-**GPUs on RunPod.** `infra/runpod/` is a Terraform module that brings up one
+**GPUs on RunPod.** Two ways. `./scripts/runpod_up.sh` uses `runpodctl` —
+no state, on-demand pods, writes the `RESCAN_LLM_*` lines into `.env` and
+`infra/aws/llm.auto.tfvars`; `./scripts/runpod_down.sh` deletes the pods and
+keeps the weight volumes. `infra/runpod/` is a Terraform module that brings up one
 vLLM pod per model — weights on a network volume, spot by default — and
 prints the `.env` lines. Its default shape runs the per-candidate passes on
 Qwen3.8-27B and routes the once-per-job plan-compile pass to
