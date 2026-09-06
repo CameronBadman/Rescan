@@ -86,7 +86,10 @@ class Settings(BaseSettings):
     shortlist_size: int = 10
 
     # --- pipeline ---
-    pipeline_workers: int = 4
+    # Documents in flight at once. Each one is a chain of model calls, so this
+    # is what turns a queue of resumes into one batched inference workload;
+    # keep it at or below llm_max_concurrency, which bounds the server side.
+    pipeline_workers: int = 12
     max_retries: int = 1
 
     # --- MCP server ---
