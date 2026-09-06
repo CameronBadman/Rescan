@@ -1,24 +1,11 @@
-# This file is maintained automatically by "tofu init".
+# This file is maintained automatically by "terraform init".
 # Manual edits may be lost in future updates.
 
-provider "registry.opentofu.org/decentralized-infrastructure/runpod" {
+provider "registry.terraform.io/decentralized-infrastructure/runpod" {
   version     = "1.0.1"
   constraints = "~> 1.0"
   hashes = [
-    "h1:0dRF5WgtNZ+SbiJwwXT+HFZmIAwOFKGEsXyt3Zuc3xc=",
-    "h1:2W/nTOff0G1qy5tXHhVYN+Va2amTjHuSIAHi8762KZ4=",
-    "h1:7Kz+xt+uJa6aTmPRbI7RF5PRuk4fdKvmSs/8BwUHG/w=",
-    "h1:DbMBjywysRu5WcJpDPJjJ46+nojJoidqv4SAKa3oRBw=",
-    "h1:KHfYKC9OfP9kfnbL+rNELYbgu0ueTxOBaGeZwvaRc1E=",
-    "h1:Oe3PcZ52FnZa2mk8aKV2T2W/RUWZgeZ2yVmZaVQYIpE=",
-    "h1:Z87V3O/sn1twtmZgSVp1FA4WMUR2w95371MSqP7UZbg=",
-    "h1:a36xqw39OD9a4/ilxqMM10+Jd9/lyqO4n8kkOrpxvew=",
-    "h1:cdHtCbDHWQvuP6E+mT76WTSgRbxhTb5qzwYmu9OjGbw=",
-    "h1:k0WyfItMItpOTC2hK/WM7SezchTAYTjpsO6bE95PA0U=",
     "h1:njZD2XZ7yDb4vxTvpuhV41MICdxcJtHzJEIYzrFA+h4=",
-    "h1:wnptp00kW+W/kmbi6NUypmRiTUSso4zB5Jke9RmKcE4=",
-    "h1:xkYEim6wtSNAYJcJXJjS1yN22rMCkWAwPKEEv3FSTVU=",
-    "h1:xmOyO67k+KbCY0LB4NF9uDub/o9VuImm259kaqAkoUE=",
     "zh:04828ac1b536dd54115a0b8784d6836d99abc5f542a8e18cbd2aea39c7cfe00a",
     "zh:1e804697a42f73c1bd91953ada1b26d8b3f30a1fdcd0ca77ccf5eca168033216",
     "zh:2604c521f3119b322592bf3b135a076eade2eb52ba8f9a8541dbd64e2da18f95",

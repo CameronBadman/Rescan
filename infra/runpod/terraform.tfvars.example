@@ -3,19 +3,28 @@
 vllm_api_key   = "change-me-to-a-long-random-string"
 data_center_id = "US-GA-2"
 
-# Everything on the 235B, spot, four H100s — the "one big ephemeral pod" shape.
-# Comment this block out to get the default two-pod shape (27B for the
-# per-candidate passes, 235B for plan compilation).
-deployments = {
-  compile = {
-    model           = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
-    gpu_type_ids    = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"]
-    gpu_count       = 4
-    tensor_parallel = 4
-    max_model_len   = 32768
-    max_num_seqs    = 16
-    volume_gb       = 300
-    interruptible   = true
-    role            = "compile"
-  }
-}
+# The default (no `deployments` block) is Qwen3.8-27B on one H100, spot,
+# serving every pass. Uncomment to add a second pod running a 235B MoE for
+# the once-per-job plan-compile pass; the client routes it automatically.
+#
+# deployments = {
+#   bulk = {
+#     model            = "Qwen/Qwen3.8-27B"
+#     gpu_type_ids     = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL", "NVIDIA A100-SXM4-80GB"]
+#     gpu_count        = 1
+#     volume_gb        = 80
+#     reasoning_parser = "qwen3"
+#     disable_thinking = true
+#     role             = "bulk"
+#   }
+#   compile = {
+#     model           = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+#     gpu_type_ids    = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"]
+#     gpu_count       = 4
+#     tensor_parallel = 4
+#     max_model_len   = 32768
+#     max_num_seqs    = 8
+#     volume_gb       = 300
+#     role            = "compile"
+#   }
+# }

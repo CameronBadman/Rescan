@@ -60,10 +60,9 @@ variable "deployments" {
     One vLLM pod per entry, each with its own network volume for the model
     weights so a spot interruption or a redeploy does not re-download them.
 
-    The default shape is the one Rescan is built for: the per-candidate
-    passes (structure, anonymize, judge, rank) on a 27B dense model, and the
-    once-per-job plan-compile pass on a 235B MoE. Drop `bulk` to run
-    everything on the 235B; drop `compile` to run everything on the 27B.
+    The default is one pod: Qwen3.8-27B serving every pass. A second entry
+    with role "compile" (see terraform.tfvars.example) routes the once-per-job
+    plan-compile pass to a bigger model; it is optional.
   EOT
   type = map(object({
     model             = string
@@ -93,18 +92,6 @@ variable "deployments" {
       reasoning_parser = "qwen3"
       disable_thinking = true
       role             = "bulk"
-    }
-    compile = {
-      # FP8 weights are ~235 GB; the model card's serving recipe is
-      # tensor-parallel 4. Two H200s (282 GB) also fit with a shorter context.
-      model           = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
-      gpu_type_ids    = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL"]
-      gpu_count       = 4
-      tensor_parallel = 4
-      max_model_len   = 32768
-      max_num_seqs    = 8
-      volume_gb       = 300
-      role            = "compile"
     }
   }
 

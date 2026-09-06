@@ -12,24 +12,18 @@ terraform output -raw rescan_env > ../../.env  # base URLs, model names, key
 terraform destroy                              # stops the meter; volumes are kept only if you keep them
 ```
 
-## The two shapes
+## The shape
 
-**Default — two pods.** The per-candidate passes (structure, anonymize, judge,
-rank) run hundreds of times per batch on **Qwen3.8-27B** (1× H100 80 GB,
-~$3/h list). The once-per-job plan-compile pass — the one where model quality
-shows — runs on **Qwen3-235B-A22B-Instruct-2507-FP8** (4× H100, ~$12/h list,
-less on spot). The output wires `RESCAN_LLM_*` to the first and
-`RESCAN_COMPILE_*` to the second; Rescan's client routes `compile_dsl` and
-its repair round to the compile server and everything else to the bulk one.
+**Default — one pod.** **Qwen3.8-27B** (1× H100 80 GB, ~$3/h list, less on
+spot) serves every pass: structuring, anonymization, plan compilation, the
+ASK judge, ranking. The output wires `RESCAN_LLM_*` to it.
 
-**One big pod.** `terraform.tfvars.example` runs everything on the 235B. Fewer
-moving parts, higher per-candidate cost, and the 22B-active MoE decodes about
-as fast as the 27B dense, so the batch is not slower — just pricier per hour.
-
-Drop the `compile` entry instead to run everything on the 27B and see whether
-its DSL compilation is good enough before paying for the bigger model. That is
-the right first experiment: `python -m scripts.smoke_real_model` prints the
-compiled program.
+**Optional — a second pod for plan compilation.** `terraform.tfvars.example`
+shows a `compile` entry running Qwen3-235B-A22B-Instruct-2507-FP8 on 4× H100.
+The once-per-job plan-compile pass is where model quality shows most, and
+Rescan's client routes `compile_dsl` and its repair round to `RESCAN_COMPILE_*`
+when set. Only reach for it if `python -m scripts.smoke_real_model` shows the
+27B compiling plans badly.
 
 ## What to know
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Bring up Rescan's inference on RunPod with runpodctl — no Terraform state.
 #
-# One vLLM pod per deployment, weights on a network volume that is reused
-# across runs. Default shape: the per-candidate passes on Qwen3.8-27B (1x
-# H100) and the once-per-job plan-compile pass on Qwen3-235B-A22B (4x H100).
-# On-demand pods (runpodctl has no spot flag; infra/runpod does).
+# One vLLM pod, weights on a network volume that is reused across runs.
+# Default: Qwen3.8-27B on one H100 serving every pass. On-demand pods
+# (runpodctl has no spot flag; infra/runpod does).
 #
 #   export RUNPOD_API_KEY=...            # or RUNPOD_API_KEY= in .env
-#   ./scripts/runpod_up.sh               # two pods
-#   SHAPE=big ./scripts/runpod_up.sh     # everything on the 235B
-#   SHAPE=small ./scripts/runpod_up.sh   # everything on the 27B
+#   ./scripts/runpod_up.sh               # Qwen3.8-27B, everything on it
+#   SHAPE=two ./scripts/runpod_up.sh     # optional: also a 235B pod for plan compilation
+#   SHAPE=big ./scripts/runpod_up.sh     # optional: everything on the 235B
 #   WAIT=1 ./scripts/runpod_up.sh        # also wait until vLLM has loaded the weights
 #
 # Writes the RESCAN_LLM_* / RESCAN_COMPILE_* lines into .env, records the pod
@@ -25,7 +24,7 @@ if [ -z "${RUNPOD_API_KEY:-}" ] && [ -f .env ]; then
 fi
 [ -n "${RUNPOD_API_KEY:-}" ] || { echo "RUNPOD_API_KEY is not set (shell or .env)" >&2; exit 2; }
 
-SHAPE="${SHAPE:-two}"                     # two | big | small
+SHAPE="${SHAPE:-small}"                   # small (27B, default) | two | big
 DC="${DC:-US-GA-2}"                       # must support network volumes and stock the GPUs
 IMAGE="${IMAGE:-vllm/vllm-openai:latest}"
 BULK_GPU="${BULK_GPU:-NVIDIA H100 80GB HBM3}"
