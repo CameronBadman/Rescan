@@ -1,4 +1,4 @@
-"""Pull one job's resumes out of the object store."""
+"""Pull one batch's resumes out of the object store."""
 
 from __future__ import annotations
 
@@ -25,26 +25,26 @@ class BucketPull:
         return sum(len(data) for _, data in self.documents)
 
 
-def job_prefix(job_id: str, prefix: str | None = None) -> str:
+def batch_prefix(batch_id: str, prefix: str | None = None) -> str:
     base = settings.s3_prefix if prefix is None else prefix
     base = base.strip("/")
-    return f"{base}/{job_id.strip('/')}/" if base else f"{job_id.strip('/')}/"
+    return f"{base}/{batch_id.strip('/')}/" if base else f"{batch_id.strip('/')}/"
 
 
-def pull_job_documents(
+def pull_batch_documents(
     store: ObjectStore,
-    job_id: str,
+    batch_id: str,
     *,
     prefix: str | None = None,
     max_bytes: int = MAX_UNPACKED_BYTES,
 ) -> BucketPull:
-    """List `<prefix>/<jobId>/`, download every usable document, expand archives.
+    """List `<prefix>/<batchId>/`, download every usable document, expand archives.
 
     Objects that are not resumes (a manifest, a thumbnail) are skipped and
     reported rather than failing the pull; a document that cannot be read is
     reported the same way so the recruiter can see what did not arrive.
     """
-    where = job_prefix(job_id, prefix)
+    where = batch_prefix(batch_id, prefix)
     pull = BucketPull(prefix=where)
     refs: list[ObjectRef] = store.list_objects(where)
 
@@ -56,7 +56,7 @@ def pull_job_documents(
             pull.skipped.append({"key": ref.key, "reason": "not a supported document type"})
             continue
         if pulled + ref.size > max_bytes:
-            pull.skipped.append({"key": ref.key, "reason": "size limit for one job reached"})
+            pull.skipped.append({"key": ref.key, "reason": "size limit for one batch reached"})
             continue
         try:
             data = store.get_object(ref.key)

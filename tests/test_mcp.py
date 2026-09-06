@@ -87,6 +87,12 @@ async def test_unmappable_qualification_asks_for_a_human_rather_than_failing():
 async def test_new_tools_are_exposed():
     tools = {tool.name for tool in await server.list_tools()}
     assert {"compile_hiring_plan", "describe_query_language", "parse_query", "query_candidates"} <= tools
+    assert {
+        "list_batches", "start_batch_from_bucket", "batch_status", "batch_audit",
+        "list_runs", "start_run", "run_status", "run_rules", "run_shortlist", "run_audit",
+        "add_rule_to_run", "remove_rule_from_run",
+    } <= tools
+    assert not any("job" in name for name in tools), "the job surface is gone"
 
 
 async def test_compile_hiring_plan_returns_reasoning_and_a_program():
@@ -111,13 +117,12 @@ async def test_describe_and_parse():
     assert bad["ok"] is False and bad["error"]["forbidden"] is True and bad["error"]["statutes"]
 
 
-async def test_query_candidates_over_a_processed_job(tmp_path, monkeypatch, samples):
+async def test_query_candidates_over_an_ingested_batch(tmp_path, monkeypatch, samples):
     import rescan.mcp_server as mcp_module
     from rescan.config import settings
     from rescan.extract import Extractor
     from rescan.llm.client import build_client
     from rescan.pipeline.runner import PipelineRunner
-    from rescan.schemas import RoleSpec
     from rescan.store import Store
 
     monkeypatch.setattr(settings, "upload_dir", tmp_path / "uploads")
@@ -126,16 +131,16 @@ async def test_query_candidates_over_a_processed_job(tmp_path, monkeypatch, samp
     monkeypatch.setattr(mcp_module, "_store", store)
     runner = PipelineRunner(store, build_client("stub"), Extractor())
     files = [(p.name, p.read_bytes()) for p in sorted(samples.glob("*.txt"))[:5]]
-    job_id = runner.create_job(RoleSpec(title="Engineer"), files, job_id="job_mcp")
-    runner.run_job(job_id, [])
+    runner.create_batch(files, batch_id="batch_mcp")
+    runner.process_batch("batch_mcp")
 
-    result = unwrap(await server.call_tool("query_candidates", {"job_id": "job_mcp", "dsl": "years_experience >= 3", "model_checks": False}))
+    result = unwrap(await server.call_tool("query_candidates", {"batch_id": "batch_mcp", "dsl": "years_experience >= 3", "model_checks": False}))
     assert result["counts"]["matched"] + result["counts"]["not_matched"] + result["counts"]["indeterminate"] == 5
     assert all("reason" in e for e in result["matched"] + result["not_matched"])
 
-    missing = unwrap(await server.call_tool("query_candidates", {"job_id": "nope", "dsl": "aqf >= 7"}))
+    missing = unwrap(await server.call_tool("query_candidates", {"batch_id": "nope", "dsl": "aqf >= 7"}))
     assert missing["ok"] is False and missing["error"]["kind"] == "not_found"
-    refused = unwrap(await server.call_tool("query_candidates", {"job_id": "job_mcp", "dsl": 'ASK "Is the candidate a recent graduate?"'}))
+    refused = unwrap(await server.call_tool("query_candidates", {"batch_id": "batch_mcp", "dsl": 'ASK "Is the candidate a recent graduate?"'}))
     assert refused["ok"] is False and refused["error"]["kind"] == "legal"
     store.close()
 
@@ -187,52 +192,69 @@ async def test_remote_mode_routes_rule_tools_through_the_api(remote):
     assert [c[1].rsplit("deployed", 1)[-1] for c in remote] == ["/rules/check", "/rules/compile", "/dsl/parse", "/dsl/fields"]
 
 
-async def test_remote_mode_job_tools(remote, tmp_path, samples):
+async def test_remote_mode_batch_and_run_tools(remote, tmp_path, samples):
+    import time
+
     from rescan.ingest import LocalObjectStore
 
     store = LocalObjectStore(tmp_path / "bucket")
     for path in sorted(samples.glob("*.txt"))[:3]:
         store.put_object(f"jobs/agent-1/{path.name}", path.read_bytes())
 
-    if True:
-        started = unwrap(await server.call_tool(
-            "start_job_from_bucket",
-            {"job_id": "agent-1", "role_title": "Engineer", "plan": "Must have 2+ years experience."},
-        ))
-        assert started["accepted_documents"] == 3
-        import time
-        for _ in range(200):
-            status = unwrap(await server.call_tool("job_status", {"job_id": "agent-1"}))
-            if status["status"] in {"complete", "failed"}:
-                break
-            time.sleep(0.05)
-        assert status["status"] == "complete"
-        rules = unwrap(await server.call_tool("job_rules", {"job_id": "agent-1"}))
-        assert rules["rules"][0]["dsl"] == "REQUIRE years_experience >= 2"
-        shortlist = unwrap(await server.call_tool("job_shortlist", {"job_id": "agent-1"}))
-        assert "identity" not in (shortlist["entries"] + shortlist["excluded"])[0], "anonymized by default"
-        audit = unwrap(await server.call_tool("job_audit", {"job_id": "agent-1", "event": "plan_compiled"}))
-        assert audit["entries"] and "plan_compiled" in audit["events"]
-        listed = unwrap(await server.call_tool("list_jobs", {}))
-        assert any(j["id"] == "agent-1" for j in listed["jobs"])
-        missing = unwrap(await server.call_tool("job_status", {"job_id": "nope"}))
-        assert missing["ok"] is False and missing["error"]["kind"] == "not_found"
-        again = unwrap(await server.call_tool("start_job_from_bucket", {"job_id": "agent-1", "role_title": "Engineer"}))
-        assert again["ok"] is False and again["error"]["kind"] == "conflict"
+    started = unwrap(await server.call_tool(
+        "start_batch_from_bucket", {"batch_id": "agent-1", "name": "Agent batch"}
+    ))
+    assert started["accepted_documents"] == 3
+    for _ in range(400):
+        batch = unwrap(await server.call_tool("batch_status", {"batch_id": "agent-1"}))
+        if batch["status"] in {"complete", "failed"}:
+            break
+        time.sleep(0.05)
+    assert batch["status"] == "complete" and batch["ready"] == 3
+
+    run_id = unwrap(await server.call_tool(
+        "start_run",
+        {"batch_id": "agent-1", "role_title": "Engineer", "plan": "Must have 2+ years experience.", "name": "First"},
+    ))["run_id"]
+    for _ in range(400):
+        status = unwrap(await server.call_tool("run_status", {"run_id": run_id}))
+        if status["status"] in {"complete", "failed"}:
+            break
+        time.sleep(0.05)
+    assert status["status"] == "complete" and status["batch_id"] == "agent-1"
+
+    rules = unwrap(await server.call_tool("run_rules", {"run_id": run_id}))
+    assert rules["rules"][0]["dsl"] == "REQUIRE years_experience >= 2"
+    shortlist = unwrap(await server.call_tool("run_shortlist", {"run_id": run_id}))
+    assert "identity" not in (shortlist["entries"] + shortlist["excluded"])[0], "anonymized by default"
+    audit = unwrap(await server.call_tool("run_audit", {"run_id": run_id, "event": "plan_compiled"}))
+    assert audit["entries"] and "plan_compiled" in audit["events"]
+
+    assert any(b["id"] == "agent-1" for b in unwrap(await server.call_tool("list_batches", {}))["batches"])
+    assert [r["id"] for r in unwrap(await server.call_tool("list_runs", {"q": "First"}))["runs"]] == [run_id]
+
+    missing = unwrap(await server.call_tool("run_status", {"run_id": "nope"}))
+    assert missing["ok"] is False and missing["error"]["kind"] == "not_found"
+    again = unwrap(await server.call_tool("start_batch_from_bucket", {"batch_id": "agent-1"}))
+    assert again["ok"] is False and again["error"]["kind"] == "conflict"
 
 
-async def test_local_mode_job_tools_report_missing_jobs():
+async def test_local_mode_tools_report_missing_batches_and_runs():
+    import pathlib
+    import tempfile
+
     import rescan.mcp_server as mcp_module
     from rescan.store import Store
-    import tempfile, pathlib
 
     with tempfile.TemporaryDirectory() as tmp:
         store = Store(pathlib.Path(tmp) / "l.db")
         mcp_module._store = store
         try:
-            assert unwrap(await server.call_tool("job_status", {"job_id": "nope"}))["ok"] is False
-            assert unwrap(await server.call_tool("job_shortlist", {"job_id": "nope"}))["ok"] is False
-            assert unwrap(await server.call_tool("list_jobs", {}))["jobs"] == []
+            assert unwrap(await server.call_tool("batch_status", {"batch_id": "nope"}))["ok"] is False
+            assert unwrap(await server.call_tool("run_status", {"run_id": "nope"}))["ok"] is False
+            assert unwrap(await server.call_tool("run_shortlist", {"run_id": "nope"}))["ok"] is False
+            assert unwrap(await server.call_tool("list_batches", {}))["batches"] == []
+            assert unwrap(await server.call_tool("list_runs", {}))["runs"] == []
         finally:
             mcp_module._store = None
             store.close()

@@ -157,7 +157,7 @@ def test_results_come_back_ordered(llm):
     assert [s.score for s in merged] == sorted((s.score for s in merged), reverse=True)
 
 
-def test_ensemble_only_runs_on_borderline_candidates_in_a_job(tmp_path, monkeypatch, samples):
+def test_ensemble_only_runs_on_borderline_candidates_in_a_run(tmp_path, monkeypatch, samples):
     from rescan.extract import Extractor
     from rescan.llm.client import build_client
     from rescan.pipeline.runner import PipelineRunner
@@ -170,10 +170,12 @@ def test_ensemble_only_runs_on_borderline_candidates_in_a_job(tmp_path, monkeypa
     runner = PipelineRunner(store, build_client("stub"), Extractor())
 
     files = [(p.name, p.read_bytes()) for p in sorted(samples.glob("*.txt"))]
-    job_id = runner.create_job(RoleSpec(title="Senior Backend Engineer", min_years_experience=5), files)
-    runner.run_job(job_id, ["At least 2 years of professional experience"])
+    batch_id = runner.create_batch(files)
+    runner.process_batch(batch_id)
+    run_id = runner.create_run(batch_id, RoleSpec(title="Senior Backend Engineer", min_years_experience=5))
+    runner.execute_run(run_id, ["At least 2 years of professional experience"])
 
-    trail = store.audit_trail(job_id)
+    trail = store.audit_trail(run_id=run_id)
     started = [e for e in trail if e["event"] == "ensemble_started"]
     assert started, "ensemble should have run"
     rescored = started[0]["detail"]["candidates"]
@@ -195,7 +197,9 @@ def test_ensemble_can_be_disabled(tmp_path, monkeypatch, samples):
     store = Store(tmp_path / "d.db")
     runner = PipelineRunner(store, build_client("stub"), Extractor(), use_ensemble=False)
     files = [(p.name, p.read_bytes()) for p in sorted(samples.glob("*.txt"))]
-    job_id = runner.create_job(RoleSpec(title="Engineer"), files)
-    runner.run_job(job_id, [])
-    assert not [e for e in store.audit_trail(job_id) if e["event"].startswith("ensemble")]
+    batch_id = runner.create_batch(files)
+    runner.process_batch(batch_id)
+    run_id = runner.create_run(batch_id, RoleSpec(title="Engineer"))
+    runner.execute_run(run_id, [])
+    assert not [e for e in store.audit_trail(batch_id) if e["event"].startswith("ensemble")]
     store.close()

@@ -202,28 +202,50 @@ class ExtractionResult(BaseModel):
 
 
 # --------------------------------------------------------------------------
-# Job / candidate lifecycle
+# Batch / candidate / run lifecycle
 # --------------------------------------------------------------------------
 
 
 class CandidateStatus(str, Enum):
+    """Where a document is in *batch* processing.
+
+    Screening and ranking belong to an analysis run, not to the document, so
+    they are not stages here: a candidate is READY once it has an anonymized
+    profile, and every run screens it independently.
+    """
+
     PENDING = "pending"
     EXTRACTING = "extracting"
     STRUCTURING = "structuring"
     ANONYMIZING = "anonymizing"
-    SCREENING = "screening"
-    RANKING = "ranking"
-    COMPLETE = "complete"
-    FAILED = "failed"
+    READY = "ready"
+    # Nothing could be read from the document; a human has to look. Never a
+    # rejection — the candidate was not assessed.
     NEEDS_MANUAL_REVIEW = "needs_manual_review"
+    FAILED = "failed"
     DUPLICATE = "duplicate"
 
 
-class JobStatus(str, Enum):
+class BatchStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETE = "complete"
     FAILED = "failed"
+
+
+class RunStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class CandidateOutcome(str, Enum):
+    """What one analysis run concluded about one candidate."""
+
+    ELIGIBLE = "eligible"
+    EXCLUDED = "excluded"
+    NEEDS_MANUAL_REVIEW = "needs_manual_review"
 
 
 class AuditEntry(BaseModel):

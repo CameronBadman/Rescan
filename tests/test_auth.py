@@ -28,32 +28,32 @@ def test_health_stays_public_for_load_balancer_probes(secured):
 
 
 def test_protected_route_rejects_a_missing_key(secured):
-    response = secured.get("/jobs")
+    response = secured.get("/batches")
     assert response.status_code == 401
     assert response.headers.get("www-authenticate") == "Bearer"
 
 
 def test_protected_route_rejects_a_wrong_key(secured):
-    assert secured.get("/jobs", headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert secured.get("/batches", headers={"Authorization": "Bearer nope"}).status_code == 401
 
 
 def test_bearer_token_is_accepted(secured):
-    assert secured.get("/jobs", headers={"Authorization": f"Bearer {KEY}"}).status_code == 200
+    assert secured.get("/batches", headers={"Authorization": f"Bearer {KEY}"}).status_code == 200
 
 
 def test_x_api_key_header_is_accepted(secured):
-    assert secured.get("/jobs", headers={"X-API-Key": KEY}).status_code == 200
+    assert secured.get("/batches", headers={"X-API-Key": KEY}).status_code == 200
 
 
 def test_upload_is_protected(secured, samples):
     files = [("files", ("a.txt", (samples / "001_priya_nair.txt").read_bytes(), "text/plain"))]
-    unauthorised = secured.post("/jobs", files=files, data={"role": json.dumps({"title": "X"}), "rules": "[]"})
+    unauthorised = secured.post("/batches", files=files)
     assert unauthorised.status_code == 401
 
 
 def test_auth_is_disabled_when_no_keys_are_configured(client, monkeypatch):
     monkeypatch.setattr(settings, "api_keys", [])
-    assert client.get("/jobs").status_code == 200
+    assert client.get("/batches").status_code == 200
 
 
 # --------------------------------------------------------------------------
@@ -103,15 +103,15 @@ def test_preflight_from_an_allowed_origin_succeeds_without_a_key(secured):
 
 
 def test_actual_request_still_needs_the_key_and_gets_cors_headers(secured):
-    denied = secured.get("/jobs", headers={"Origin": "http://localhost:3000"})
+    denied = secured.get("/batches", headers={"Origin": "http://localhost:3000"})
     assert denied.status_code == 401
-    allowed = secured.get("/jobs", headers={"Origin": "http://localhost:3000", "X-API-Key": KEY})
+    allowed = secured.get("/batches", headers={"Origin": "http://localhost:3000", "X-API-Key": KEY})
     assert allowed.status_code == 200
     assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
 def test_unlisted_origin_gets_no_cors_headers(secured):
-    response = secured.get("/jobs", headers={"Origin": "https://evil.example", "X-API-Key": KEY})
+    response = secured.get("/batches", headers={"Origin": "https://evil.example", "X-API-Key": KEY})
     assert response.status_code == 200
     assert "access-control-allow-origin" not in response.headers
 

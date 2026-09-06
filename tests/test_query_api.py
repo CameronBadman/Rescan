@@ -20,6 +20,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "db_path", tmp_path / "q.db")
     monkeypatch.setattr(settings, "upload_dir", tmp_path / "uploads")
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "object_store", "local")
+    monkeypatch.setattr(settings, "local_object_store_dir", tmp_path / "bucket")
     with TestClient(app) as test_client:
         yield test_client
 
@@ -29,23 +31,29 @@ def upload_files(samples):
     return [("files", (p.name, p.read_bytes(), "text/plain")) for p in sorted(samples.glob("*.txt"))]
 
 
-def wait_for(client, job_id, timeout=30.0):
+def wait_for(client, path, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status = client.get(f"/jobs/{job_id}/status").json()
-        if status["status"] in {"complete", "failed"}:
-            return status
+        body = client.get(path).json()
+        if body["status"] in {"complete", "failed"}:
+            return body
         time.sleep(0.05)
-    raise AssertionError("job did not finish")
+    raise AssertionError(f"{path} did not finish")
 
 
 @pytest.fixture()
-def finished_job(client, upload_files):
-    job_id = client.post(
-        "/jobs", files=upload_files, data={"role": json.dumps(ROLE), "plan": PLAN, "rules": "[]"}
-    ).json()["job_id"]
-    assert wait_for(client, job_id)["status"] == "complete"
-    return job_id
+def batch(client, upload_files):
+    batch_id = client.post("/batches", files=upload_files).json()["batch_id"]
+    assert wait_for(client, f"/batches/{batch_id}")["status"] == "complete"
+    return batch_id
+
+
+@pytest.fixture()
+def analysed(client, batch):
+    """A batch with one finished analysis run over it."""
+    run_id = client.post("/runs", json={"batch_id": batch, "role": ROLE, "plan": PLAN}).json()["run_id"]
+    assert wait_for(client, f"/runs/{run_id}")["status"] == "complete"
+    return batch, run_id
 
 
 # --------------------------------------------------------------------------
@@ -121,16 +129,17 @@ def test_rule_check_keeps_one_result_per_rule(client):
 # --------------------------------------------------------------------------
 
 
-def test_job_compiles_the_plan_and_records_it(client, finished_job):
-    rules = client.get(f"/jobs/{finished_job}/rules").json()
+def test_a_run_compiles_the_plan_and_records_it(client, analysed):
+    _, run_id = analysed
+    rules = client.get(f"/runs/{run_id}/rules").json()
     assert rules["reasoning"] and rules["source_plan"] == PLAN
-    events = {e["event"] for e in client.get(f"/jobs/{finished_job}/audit").json()["entries"]}
+    events = {e["event"] for e in client.get(f"/runs/{run_id}/audit").json()["entries"]}
     assert {"plan_compiled", "rule_risk_flagged", "rule_passed", "model_check", "scored"} <= events
 
 
-def test_query_returns_reasons_and_never_identity(client, finished_job):
+def test_query_returns_reasons_and_never_identity(client, batch):
     body = client.post(
-        f"/jobs/{finished_job}/query",
+        f"/batches/{batch}/query",
         json={"dsl": 'years_experience >= 5 AND ANY skill WHERE name = "Python"', "model_checks": False},
     ).json()
     assert body["canonical"] == 'years_experience >= 5 AND ANY skill WHERE name = "Python"'
@@ -143,38 +152,38 @@ def test_query_returns_reasons_and_never_identity(client, finished_job):
     assert body["fields"] == ["years_experience", "skill.name"]
 
 
-def test_query_is_audited(client, finished_job):
-    client.post(f"/jobs/{finished_job}/query", json={"dsl": "aqf >= 9", "model_checks": False})
-    entries = [e for e in client.get(f"/jobs/{finished_job}/audit").json()["entries"] if e["event"] == "query_run"]
+def test_query_is_audited(client, batch):
+    client.post(f"/batches/{batch}/query", json={"dsl": "aqf >= 9", "model_checks": False})
+    entries = [e for e in client.get(f"/batches/{batch}/audit").json()["entries"] if e["event"] == "query_run"]
     assert entries and entries[-1]["detail"]["query"] == "aqf >= 9"
     assert "counts" in entries[-1]["detail"]
 
 
-def test_query_with_a_model_check_runs_the_judge(client, finished_job):
+def test_query_with_a_model_check_runs_the_judge(client, batch):
     body = client.post(
-        f"/jobs/{finished_job}/query", json={"dsl": 'ASK "Has the candidate worked with Python?"'}
+        f"/batches/{batch}/query", json={"dsl": 'ASK "Has the candidate worked with Python?"'}
     ).json()
     assert body["model_checks"] is True
     assert body["counts"]["matched"] >= 1
     off = client.post(
-        f"/jobs/{finished_job}/query", json={"dsl": 'ASK "Has the candidate worked with Python?"', "model_checks": False}
+        f"/batches/{batch}/query", json={"dsl": 'ASK "Has the candidate worked with Python?"', "model_checks": False}
     ).json()
     assert off["counts"]["matched"] == 0 and off["counts"]["indeterminate"] >= 9
 
 
-def test_query_on_a_forbidden_field_is_refused_with_the_statute(client, finished_job):
-    response = client.post(f"/jobs/{finished_job}/query", json={"dsl": 'region = "Brisbane"'})
+def test_query_on_a_forbidden_field_is_refused_with_the_statute(client, batch):
+    response = client.post(f"/batches/{batch}/query", json={"dsl": 'region = "Brisbane"'})
     assert response.status_code == 422
     assert response.json()["detail"]["forbidden"] is True
 
 
-def test_query_with_a_proxy_literal_is_refused(client, finished_job):
-    response = client.post(f"/jobs/{finished_job}/query", json={"dsl": 'ASK "Is the candidate a native English speaker?"'})
+def test_query_with_a_proxy_literal_is_refused(client, batch):
+    response = client.post(f"/batches/{batch}/query", json={"dsl": 'ASK "Is the candidate a native English speaker?"'})
     assert response.status_code == 422
     detail = response.json()["detail"]
     assert detail["kind"] == "legal"
     assert detail["findings"][0]["pattern_id"] == "native_speaker"
 
 
-def test_query_on_an_unknown_job_is_404(client):
-    assert client.post("/jobs/job_nope/query", json={"dsl": "aqf >= 7"}).status_code == 404
+def test_query_on_an_unknown_batch_is_404(client):
+    assert client.post("/batches/nope/query", json={"dsl": "aqf >= 7"}).status_code == 404

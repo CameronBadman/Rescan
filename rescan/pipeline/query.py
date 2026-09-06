@@ -1,4 +1,4 @@
-"""Ad-hoc queries over a job's anonymized profiles.
+"""Ad-hoc queries over a batch's anonymized profiles.
 
 The rule language is the query base for the resumes: a recruiter (or a
 frontend, or an MCP client) can ask "who has 5+ years and Python" of a job
@@ -58,26 +58,29 @@ def check_query(dsl: str):
 
 def run_query(
     store: Store,
-    job_id: str,
+    batch_id: str,
     dsl: str,
     *,
     judge: JudgeLike | None = None,
     actor: str | None = None,
 ) -> dict[str, Any]:
-    """Evaluate a query against every anonymized profile of a job.
+    """Evaluate a query against every anonymized profile of a batch.
 
-    Raises KeyError for an unknown job, DslError for a bad query, and
+    A query is batch-scoped: it asks about the people, not about any one
+    analysis run's verdict on them.
+
+    Raises KeyError for an unknown batch, DslError for a bad query, and
     QueryRejected when the query engages a protected attribute.
     """
-    if store.get_job(job_id) is None:
-        raise KeyError(job_id)
+    if store.get_batch(batch_id) is None:
+        raise KeyError(batch_id)
     expr, warnings = check_query(dsl)
 
     matched: list[dict[str, Any]] = []
     not_matched: list[dict[str, Any]] = []
     indeterminate: list[dict[str, Any]] = []
     skipped = 0
-    for candidate in store.list_candidates(job_id):
+    for candidate in store.list_candidates(batch_id):
         raw = candidate.get("anonymized")
         if not raw:
             skipped += 1
@@ -97,7 +100,7 @@ def run_query(
             indeterminate.append(entry)
 
     result = {
-        "job_id": job_id,
+        "batch_id": batch_id,
         "query": dsl,
         "canonical": expr.to_dsl(),
         "fields": fields_used(expr),
@@ -114,7 +117,7 @@ def run_query(
         "warnings": [finding.model_dump(mode="json") for finding in warnings],
     }
     store.audit(
-        job_id, "query", "query_run",
+        batch_id, "query", "query_run",
         detail={
             "query": dsl,
             "canonical": result["canonical"],

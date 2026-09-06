@@ -1,4 +1,4 @@
-"""Changing a finished round's rules: the legal gate, and re-screening."""
+"""Changing an analysis run's rules: the legal gate, and re-screening."""
 
 import json
 import time
@@ -18,114 +18,138 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "upload_dir", tmp_path / "uploads")
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "object_store", "local")
+    monkeypatch.setattr(settings, "local_object_store_dir", tmp_path / "bucket")
     with TestClient(app) as test_client:
         yield test_client
 
 
-def wait_for(client, job_id, timeout=30.0):
+def wait_for(client, path, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status = client.get(f"/jobs/{job_id}/status").json()
-        if status["status"] in {"complete", "failed"}:
-            return status
+        body = client.get(path).json()
+        if body["status"] in {"complete", "failed"}:
+            return body
         time.sleep(0.05)
-    raise AssertionError("job did not settle")
+    raise AssertionError(f"{path} did not settle")
 
 
 @pytest.fixture()
-def finished(client, samples):
+def batch(client, samples):
     files = [("files", (p.name, p.read_bytes(), "text/plain")) for p in sorted(samples.glob("*.txt"))]
-    job_id = client.post("/jobs", files=files, data={"role": json.dumps(ROLE), "plan": "Must have 2+ years experience.", "rules": "[]"}).json()["job_id"]
-    assert wait_for(client, job_id)["status"] == "complete"
-    return job_id
+    batch_id = client.post("/batches", files=files).json()["batch_id"]
+    assert wait_for(client, f"/batches/{batch_id}")["status"] == "complete"
+    return batch_id
 
 
-def test_a_lawful_rule_is_added_and_the_round_is_rescreened(client, finished):
-    before = client.get(f"/jobs/{finished}/shortlist").json()
-    response = client.post(f"/jobs/{finished}/rules", json={"text": "At least 8 years of professional experience"})
+@pytest.fixture()
+def run(client, batch):
+    """An analysis run over an ingested batch, already screened once."""
+    run_id = client.post(
+        "/runs", json={"batch_id": batch, "role": ROLE, "plan": "Must have 2+ years experience."}
+    ).json()["run_id"]
+    assert wait_for(client, f"/runs/{run_id}")["status"] == "complete"
+    return run_id
+
+
+def test_a_lawful_rule_is_added_and_the_run_is_rescreened(client, run):
+    before = client.get(f"/runs/{run}/shortlist").json()
+    response = client.post(f"/runs/{run}/rules", json={"text": "At least 8 years of professional experience"})
     assert response.status_code == 202, response.text
     body = response.json()
     assert body["added"] and body["rescreening"]
     assert body["rule"]["dsl"] == "REQUIRE years_experience >= 8"
-    assert wait_for(client, finished)["status"] == "complete"
+    assert wait_for(client, f"/runs/{run}")["status"] == "complete"
 
-    rules = client.get(f"/jobs/{finished}/rules").json()
+    rules = client.get(f"/runs/{run}/rules").json()
     assert [r["source_text"] for r in rules["rules"]][-1] == "At least 8 years of professional experience"
-    after = client.get(f"/jobs/{finished}/shortlist").json()
+    after = client.get(f"/runs/{run}/shortlist").json()
     assert len(after["excluded"]) > len(before["excluded"]), "a stricter rule excludes more people"
     assert any("8 years" in reason for entry in after["excluded"] for reason in entry["reasons"])
-    events = [e["event"] for e in client.get(f"/jobs/{finished}/audit").json()["entries"]]
+    events = [e["event"] for e in client.get(f"/runs/{run}/audit?include_batch=false").json()["entries"]]
     assert "rule_added" in events and "rescreen_started" in events and "rescreen_complete" in events
-    assert "extracted" not in events[events.index("rescreen_started"):], "re-screening never re-extracts"
+    assert "extracted" not in events, "re-screening never re-extracts"
 
 
-def test_a_high_risk_rule_is_refused_with_the_rewrite(client, finished):
-    rules_before = client.get(f"/jobs/{finished}/rules").json()["rules"]
-    response = client.post(f"/jobs/{finished}/rules", json={"text": "Must be a native English speaker"})
+def test_a_high_risk_rule_is_refused_with_the_rewrite(client, run):
+    rules_before = client.get(f"/runs/{run}/rules").json()["rules"]
+    response = client.post(f"/runs/{run}/rules", json={"text": "Must be a native English speaker"})
     assert response.status_code == 422
     detail = response.json()["detail"]
     assert detail["kind"] == "legal"
     finding = detail["rule"]["findings"][0]
     assert any("Racial Discrimination Act" in s for s in finding["statutes"])
     assert "native" not in finding["suggested_rewrite"].lower()
-    assert client.get(f"/jobs/{finished}/rules").json()["rules"] == rules_before, "nothing was added"
-    events = [e["event"] for e in client.get(f"/jobs/{finished}/audit").json()["entries"]]
+    assert client.get(f"/runs/{run}/rules").json()["rules"] == rules_before, "nothing was added"
+    events = [e["event"] for e in client.get(f"/runs/{run}/audit?include_batch=false").json()["entries"]]
     assert "rule_rejected" in events and "rescreen_started" not in events
 
 
-def test_a_review_level_rule_is_added_with_a_note(client, finished):
-    response = client.post(f"/jobs/{finished}/rules", json={"text": "3+ years of experience at a leading company"})
+def test_a_review_level_rule_is_added_with_a_note(client, run):
+    response = client.post(f"/runs/{run}/rules", json={"text": "3+ years of experience at a leading company"})
     assert response.status_code == 202
     rule = response.json()["rule"]
     assert rule["risk"] == "review" and rule["dsl"] == "REQUIRE years_experience >= 3"
     assert any("justification" in note for note in rule["notes"])
-    wait_for(client, finished)
+    wait_for(client, f"/runs/{run}")
 
 
-def test_removing_a_rule_rescreens_without_it(client, finished):
-    added = client.post(f"/jobs/{finished}/rules", json={"text": "At least 8 years of professional experience"}).json()["rule"]
-    wait_for(client, finished)
-    excluded_with = len(client.get(f"/jobs/{finished}/shortlist").json()["excluded"])
+def test_removing_a_rule_rescreens_without_it(client, run):
+    added = client.post(f"/runs/{run}/rules", json={"text": "At least 8 years of professional experience"}).json()["rule"]
+    wait_for(client, f"/runs/{run}")
+    excluded_with = len(client.get(f"/runs/{run}/shortlist").json()["excluded"])
 
-    response = client.delete(f"/jobs/{finished}/rules/{added['id']}")
+    response = client.delete(f"/runs/{run}/rules/{added['id']}")
     assert response.status_code == 202
-    wait_for(client, finished)
-    assert all(r["id"] != added["id"] for r in client.get(f"/jobs/{finished}/rules").json()["rules"])
-    assert len(client.get(f"/jobs/{finished}/shortlist").json()["excluded"]) < excluded_with
-    assert client.delete(f"/jobs/{finished}/rules/rule_999").status_code == 404
+    wait_for(client, f"/runs/{run}")
+    assert all(r["id"] != added["id"] for r in client.get(f"/runs/{run}/rules").json()["rules"])
+    assert len(client.get(f"/runs/{run}/shortlist").json()["excluded"]) < excluded_with
+    assert client.delete(f"/runs/{run}/rules/rule_999").status_code == 404
 
 
-def test_rule_ids_stay_unique_after_removals(client, finished):
-    first = client.post(f"/jobs/{finished}/rules", json={"text": "Bachelor degree or higher"}).json()["rule"]
-    wait_for(client, finished)
-    client.delete(f"/jobs/{finished}/rules/{first['id']}")
-    wait_for(client, finished)
-    second = client.post(f"/jobs/{finished}/rules", json={"text": "Master degree or higher"}).json()["rule"]
-    wait_for(client, finished)
-    ids = [r["id"] for r in client.get(f"/jobs/{finished}/rules").json()["rules"]]
+def test_rule_ids_stay_unique_after_removals(client, run):
+    first = client.post(f"/runs/{run}/rules", json={"text": "Bachelor degree or higher"}).json()["rule"]
+    wait_for(client, f"/runs/{run}")
+    client.delete(f"/runs/{run}/rules/{first['id']}")
+    wait_for(client, f"/runs/{run}")
+    second = client.post(f"/runs/{run}/rules", json={"text": "Master degree or higher"}).json()["rule"]
+    wait_for(client, f"/runs/{run}")
+    ids = [r["id"] for r in client.get(f"/runs/{run}/rules").json()["rules"]]
     assert len(ids) == len(set(ids)) and second["id"] in ids
 
 
-def test_unknown_job_and_empty_rule(client):
-    assert client.post("/jobs/nope/rules", json={"text": "x"}).status_code == 404
+def test_unknown_run_and_empty_rule(client, run):
+    assert client.post("/runs/nope/rules", json={"text": "x"}).status_code == 404
+    assert client.post(f"/runs/{run}/rules", json={"text": "   "}).status_code == 400
 
 
-def test_a_new_round_can_reuse_a_tuned_rule_set(client, finished, samples, monkeypatch):
-    from rescan.ingest import LocalObjectStore
+def test_a_new_run_can_reuse_a_tuned_rule_set(client, batch, run):
+    client.post(f"/runs/{run}/rules", json={"text": "At least 8 years of professional experience"})
+    wait_for(client, f"/runs/{run}")
+    tuned = client.get(f"/runs/{run}/rules").json()
 
-    client.post(f"/jobs/{finished}/rules", json={"text": "At least 8 years of professional experience"})
-    wait_for(client, finished)
-    tuned = client.get(f"/jobs/{finished}/rules").json()
-
-    store = LocalObjectStore(settings.local_object_store_dir)
-    for path in sorted(samples.glob("*.txt"))[:3]:
-        store.put_object(f"jobs/next-batch/{path.name}", path.read_bytes())
-    response = client.post("/jobs/from-bucket", json={"job_id": "next-batch", "role": ROLE, "rules_from": finished})
+    response = client.post("/runs", json={"batch_id": batch, "role": ROLE, "rules_from": run, "name": "Copy"})
     assert response.status_code == 202, response.text
-    wait_for(client, "next-batch")
+    copy_id = response.json()["run_id"]
+    wait_for(client, f"/runs/{copy_id}")
 
-    copied = client.get("/jobs/next-batch/rules").json()
+    copied = client.get(f"/runs/{copy_id}/rules").json()
     assert [r["dsl"] for r in copied["rules"]] == [r["dsl"] for r in tuned["rules"]]
-    events = [e["event"] for e in client.get("/jobs/next-batch/audit").json()["entries"]]
+    events = [e["event"] for e in client.get(f"/runs/{copy_id}/audit?include_batch=false").json()["entries"]]
     assert "rules_copied" in events and "plan_compiled" not in events
-    assert client.post("/jobs/from-bucket", json={"job_id": "x", "role": ROLE, "rules_from": "nope"}).status_code == 404
+    assert client.post("/runs", json={"batch_id": batch, "role": ROLE, "rules_from": "nope"}).status_code == 404
+
+
+def test_editing_one_run_leaves_the_other_alone(client, batch, run):
+    other = client.post(
+        "/runs", json={"batch_id": batch, "role": ROLE, "plan": "Must have 2+ years experience."}
+    ).json()["run_id"]
+    wait_for(client, f"/runs/{other}")
+    before = client.get(f"/runs/{other}/shortlist?reattach_identity=false").json()
+
+    client.post(f"/runs/{run}/rules", json={"text": "At least 12 years of professional experience"})
+    wait_for(client, f"/runs/{run}")
+
+    assert client.get(f"/runs/{other}/shortlist?reattach_identity=false").json() == before
+    assert len(client.get(f"/runs/{other}/rules").json()["rules"]) < len(
+        client.get(f"/runs/{run}/rules").json()["rules"]
+    )

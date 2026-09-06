@@ -157,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         except (RankingError, LLMError) as exc:
             report.fail("rank", str(exc)[:300])
 
-    # --- one whole job ---
+    # --- one whole batch and run ---
     if not args.skip_job:
         import tempfile
 
@@ -172,20 +172,22 @@ def main(argv: list[str] | None = None) -> int:
             store = Store(Path(tmp) / "smoke.db")
             runner = PipelineRunner(store, client, Extractor(), use_ensemble=False)
             try:
-                job_id = runner.create_job(RoleSpec(title="Senior Data Engineer"), [(p.name, p.read_bytes()) for p in samples])
-                shortlist, seconds = timed(lambda: runner.run_job(job_id, [], plan=args.plan))
-                counts = store.status_counts(job_id)
+                batch_id = runner.create_batch([(p.name, p.read_bytes()) for p in samples], name="smoke")
+                counts, ingest_seconds = timed(lambda: runner.process_batch(batch_id))
+                run_id = runner.create_run(batch_id, RoleSpec(title="Senior Data Engineer"), name="smoke run")
+                shortlist, run_seconds = timed(lambda: runner.execute_run(run_id, [], plan=args.plan))
+                seconds = ingest_seconds + run_seconds
                 events = {}
-                for entry in store.audit_trail(job_id):
+                for entry in store.audit_trail(batch_id):
                     events[entry["event"]] = events.get(entry["event"], 0) + 1
                 detail = (f"{seconds:.1f}s  docs={len(samples)} counts={ {k: v for k, v in counts.items() if v} } "
                           f"shortlisted={len(shortlist['entries'])} excluded={len(shortlist['excluded'])} "
                           f"manual={len(shortlist['manual_review'])}\n       events={events}")
-                dead = [entry for entry in store.audit_trail(job_id) if entry["event"] in ("dead_lettered", "failed")]
+                dead = [entry for entry in store.audit_trail(batch_id) if entry["event"] in ("dead_lettered", "failed")]
                 for entry in dead[:4]:
                     detail += f"\n       {entry['event']} at {entry['stage']}: {entry['detail'].get('reason', '')[:160]}"
-                if counts.get("complete", 0) == 0:
-                    report.fail("job", detail + "\n       (no document made it through the pipeline)")
+                if counts.get("ready", 0) == 0:
+                    report.fail("job", detail + "\n       (no document made it through ingestion)")
                 else:
                     report.ok("job", detail)
             except Exception as exc:  # a failed job is the finding

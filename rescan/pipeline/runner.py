@@ -1,13 +1,20 @@
-"""Bulk job orchestration.
+"""Batch ingestion and analysis runs.
 
-A job is: classify the recruiter's rules once, run every uploaded document
-through extraction, structuring, anonymization and screening concurrently, then
-rank the survivors and cut a shortlist.
+Two orchestrations, deliberately separate.
+
+A **batch** is ingested once: every uploaded document is extracted, structured
+and de-identified, and the result is a set of anonymized profiles. No rule and
+no role is involved — this work is the same whoever ends up screening it.
+
+An **analysis run** applies one compiled rule set to a finished batch: it
+screens every profile, ranks the survivors and cuts a shortlist. A batch can
+carry many runs, and each keeps its own outcomes, so a second analysis never
+overwrites the first and two rule sets can be compared over the same people.
 
 Failure handling is deliberate. A document that fails extraction is retried
 once and then dead-lettered to `needs_manual_review`, never dropped, and never
 counted as a rejected candidate. A candidate whose anonymization leaks identity
-fails closed rather than reaching the ranking pass.
+fails closed rather than reaching any run.
 """
 
 from __future__ import annotations
@@ -33,9 +40,11 @@ from rescan.rules.models import ClassifiedRule, RuleSet
 from rescan.rules.statutes import RiskLevel
 from rescan.schemas import (
     AnonymizedProfile,
+    BatchStatus,
+    CandidateOutcome,
     CandidateStatus,
-    JobStatus,
     RoleSpec,
+    RunStatus,
 )
 from rescan.store import Store
 
@@ -48,6 +57,10 @@ class RuleRejected(ValueError):
     def __init__(self, rule: ClassifiedRule) -> None:
         super().__init__("rule rejected: it screens on a protected attribute or a proxy for one")
         self.rule = rule
+
+
+class BatchNotReady(RuntimeError):
+    """A run was asked for over a batch that has not finished ingesting."""
 
 
 class PipelineRunner:
@@ -65,187 +78,109 @@ class PipelineRunner:
         self.workers = workers or settings.pipeline_workers
         self.use_ensemble = use_ensemble
 
-    # ------------------------------------------------------------------
-    # Intake
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Batches: intake and de-identification
+    # ==================================================================
 
-    def create_job(
+    def create_batch(
         self,
-        role: RoleSpec,
         files: Sequence[tuple[str, bytes]],
         *,
-        job_id: str | None = None,
+        batch_id: str | None = None,
+        name: str | None = None,
+        source: dict[str, Any] | None = None,
     ) -> str:
-        """Register a job and its documents. Returns immediately with the job id."""
-        job_id = job_id or f"job_{uuid.uuid4().hex[:12]}"
-        self.store.create_job(job_id, role.model_dump(mode="json"))
+        """Register a batch and its documents. Returns immediately with the id."""
+        batch_id = batch_id or f"batch_{uuid.uuid4().hex[:12]}"
+        self.store.create_batch(batch_id, name=name, source=source)
 
-        job_dir = settings.upload_dir / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
+        batch_dir = settings.upload_dir / batch_id
+        batch_dir.mkdir(parents=True, exist_ok=True)
 
         accepted = duplicates = 0
         for filename, data in files:
             digest = content_hash(data)
             candidate_id = f"cand_{uuid.uuid4().hex[:12]}"
-            existing = self.store.add_candidate(candidate_id, job_id, filename, digest)
+            existing = self.store.add_candidate(candidate_id, batch_id, filename, digest)
             if existing is not None:
-                # Same bytes already in this job: record it, do not reprocess.
-                self.store.add_duplicate(candidate_id, job_id, filename, digest, duplicate_of=existing)
+                # Same bytes already in this batch: record it, do not reprocess.
+                self.store.add_duplicate(candidate_id, batch_id, filename, digest, duplicate_of=existing)
                 duplicates += 1
                 self.store.audit(
-                    job_id, "ingestion", "duplicate_skipped",
+                    batch_id, "ingestion", "duplicate_skipped",
                     candidate_id=candidate_id,
                     detail={"filename": filename, "duplicate_of": existing},
                 )
                 continue
-            (job_dir / f"{candidate_id}{Path(filename).suffix}").write_bytes(data)
+            (batch_dir / f"{candidate_id}{Path(filename).suffix}").write_bytes(data)
             accepted += 1
 
         self.store.audit(
-            job_id, "ingestion", "job_created",
-            detail={"accepted": accepted, "duplicates": duplicates, "role": role.title},
+            batch_id, "ingestion", "batch_created",
+            detail={"accepted": accepted, "duplicates": duplicates, "name": name},
         )
-        return job_id
+        return batch_id
 
-    # ------------------------------------------------------------------
-    # Execution
-    # ------------------------------------------------------------------
+    def process_batch(self, batch_id: str) -> dict[str, int]:
+        """Extract, structure and de-identify every pending document.
 
-    def run_job(
-        self, job_id: str, rule_texts: Sequence[str], plan: str | None = None,
-        rules_from: str | None = None,
-    ) -> dict[str, Any]:
-        """Run a job to completion. Blocking; callers run it in a background task.
-
-        `rules_from` reuses another round's compiled rule set as-is — the
-        rules a recruiter refined on one batch applied to the next — instead of
-        compiling from the plan.
+        Blocking; callers run it in a background task. Returns the batch's
+        stage counts. No rules are involved: the product is a set of anonymized
+        profiles that any number of runs can screen.
         """
-        job = self.store.get_job(job_id)
-        if job is None:
-            raise KeyError(f"unknown job {job_id!r}")
-        role = RoleSpec.model_validate(job["role"])
+        batch = self.store.get_batch(batch_id)
+        if batch is None:
+            raise KeyError(f"unknown batch {batch_id!r}")
 
-        self.store.update_job(job_id, status=JobStatus.RUNNING.value)
-
+        self.store.update_batch(batch_id, status=BatchStatus.RUNNING.value)
         try:
-            if rules_from:
-                rule_set = self._copy_rules(job_id, rules_from)
-            else:
-                rule_set = self._classify_rules(job_id, rule_texts, role, plan)
-            profiles, screening = self._process_candidates(job_id, rule_set)
-            shortlist = self._rank(job_id, role, profiles, screening, rule_set)
-        except Exception as exc:  # a job failure must be visible, not silent
-            log.exception("job %s failed", job_id)
-            self.store.update_job(job_id, status=JobStatus.FAILED.value, error=str(exc))
-            self.store.audit(job_id, "job", "job_failed", detail={"error": str(exc)})
+            pending = [
+                candidate
+                for candidate in self.store.list_candidates(batch_id)
+                if candidate["status"] == CandidateStatus.PENDING.value
+            ]
+            # Refs are assigned up front and by position, so they are stable and
+            # carry no information about the candidate.
+            start = len([
+                c for c in self.store.list_candidates(batch_id)
+                if c["candidate_ref"] and c["status"] != CandidateStatus.PENDING.value
+            ])
+            for index, candidate in enumerate(pending, start=start + 1):
+                self.store.update_candidate(candidate["id"], candidate_ref=f"Candidate {index}")
+                candidate["candidate_ref"] = f"Candidate {index}"
+
+            batch_dir = settings.upload_dir / batch_id
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                list(pool.map(lambda c: self._ingest_one(batch_id, c, batch_dir), pending))
+        except Exception as exc:  # a batch failure must be visible, not silent
+            log.exception("batch %s failed", batch_id)
+            self.store.update_batch(batch_id, status=BatchStatus.FAILED.value, error=str(exc))
+            self.store.audit(batch_id, "ingestion", "batch_failed", detail={"error": str(exc)})
             raise
 
-        self.store.update_job(job_id, status=JobStatus.COMPLETE.value)
+        counts = self.store.batch_counts(batch_id)
+        self.store.update_batch(batch_id, status=BatchStatus.COMPLETE.value)
         self.store.audit(
-            job_id, "job", "job_complete",
-            detail={"shortlisted": len(shortlist.entries), "excluded": len(shortlist.excluded)},
-        )
-        return shortlist.model_dump(mode="json")
-
-    def _copy_rules(self, job_id: str, source_job_id: str) -> RuleSet:
-        rule_set = self.rule_set_for(source_job_id)
-        self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
-        self.store.audit(
-            job_id, "rules", "rules_copied",
-            detail={"from_job": source_job_id, "rules": len(rule_set.rules), "applied": len(rule_set.applied),
-                    "flagged": len(rule_set.flagged)},
-        )
-        return rule_set
-
-    def _classify_rules(
-        self, job_id: str, rule_texts: Sequence[str], role: RoleSpec, plan: str | None = None
-    ):
-        rule_set = compile_plan(plan, self.client, rule_texts=list(rule_texts), role_context=role.title)
-        self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
-
-        entries = [(
-            job_id, None, "rules", "plan_compiled",
-            {
-                "plan": rule_set.source_plan,
-                "reasoning": rule_set.reasoning,
-                "rules": len(rule_set.rules),
-                "applied": len(rule_set.applied),
-                "flagged": len(rule_set.flagged),
+            batch_id, "ingestion", "batch_complete",
+            detail={
+                "ready": counts[CandidateStatus.READY.value],
+                "needs_manual_review": counts[CandidateStatus.NEEDS_MANUAL_REVIEW.value],
+                "failed": counts[CandidateStatus.FAILED.value],
+                "duplicate": counts[CandidateStatus.DUPLICATE.value],
             },
-        )]
-        for rule in rule_set.rules:
-            entries.append((
-                job_id, None, "rules",
-                f"rule_{rule.verdict.value}",
-                {
-                    "rule_id": rule.id,
-                    "text": rule.source_text,
-                    "kind": rule.kind,
-                    "risk": rule.risk.value,
-                    "dsl": rule.dsl,
-                    "clause": rule.clause.model_dump(mode="json") if rule.clause else None,
-                    "justification": rule.justification,
-                    "notes": rule.notes,
-                },
-            ))
-            for finding in rule.findings:
-                entries.append((
-                    job_id, None, "rules", "rule_risk_flagged",
-                    {
-                        "rule_id": rule.id,
-                        "text": rule.source_text,
-                        "pattern": finding.pattern_id,
-                        "risk": finding.risk.value,
-                        "protected_attributes": finding.protected_attributes,
-                        "statutes": finding.statutes,
-                        "explanation": finding.explanation,
-                        "suggested_rewrite": finding.suggested_rewrite,
-                    },
-                ))
-        self.store.audit_many(entries)
-        return rule_set
+        )
+        return counts
 
-    def _process_candidates(
-        self, job_id: str, rule_set
-    ) -> tuple[list[AnonymizedProfile], dict[str, ScreeningResult]]:
-        pending = [
-            candidate
-            for candidate in self.store.list_candidates(job_id)
-            if candidate["status"] == CandidateStatus.PENDING.value
-        ]
-        # Refs are assigned up front and by position, so they are stable and
-        # carry no information about the candidate.
-        for index, candidate in enumerate(pending, start=1):
-            self.store.update_candidate(candidate["id"], candidate_ref=f"Candidate {index}")
-            candidate["candidate_ref"] = f"Candidate {index}"
-
-        job_dir = settings.upload_dir / job_id
-        results: list[tuple[AnonymizedProfile | None, ScreeningResult | None]] = []
-
-        with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            results = list(
-                pool.map(
-                    lambda candidate: self._process_one(job_id, candidate, job_dir, rule_set),
-                    pending,
-                )
-            )
-
-        profiles = [profile for profile, _ in results if profile is not None]
-        screening = {
-            result.candidate_ref: result for _, result in results if result is not None
-        }
-        return profiles, screening
-
-    def _process_one(
-        self, job_id: str, candidate: dict[str, Any], job_dir: Path, rule_set
-    ) -> tuple[AnonymizedProfile | None, ScreeningResult | None]:
+    def _ingest_one(
+        self, batch_id: str, candidate: dict[str, Any], batch_dir: Path
+    ) -> AnonymizedProfile | None:
+        """Extract, structure and de-identify one document."""
         candidate_id = candidate["id"]
         ref = candidate["candidate_ref"]
-        stored = next(job_dir.glob(f"{candidate_id}*"), None)
+        stored = next(batch_dir.glob(f"{candidate_id}*"), None)
         if stored is None:
-            self._fail(job_id, candidate_id, "ingestion", "uploaded file is missing from disk")
-            return None, None
+            self._fail(batch_id, candidate_id, "ingestion", "uploaded file is missing from disk")
+            return None
 
         # --- extract (one retry, then dead-letter) ---
         self.store.update_candidate(candidate_id, status=CandidateStatus.EXTRACTING.value)
@@ -255,23 +190,21 @@ class PipelineRunner:
             if extraction.char_count > 0:
                 break
             self.store.audit(
-                job_id, "extraction", "extraction_retry",
+                batch_id, "extraction", "extraction_retry",
                 candidate_id=candidate_id,
                 detail={"attempt": attempt, "warnings": extraction.warnings},
             )
         if extraction is None or extraction.char_count == 0:
             self._dead_letter(
-                job_id, candidate_id, "extraction",
+                batch_id, candidate_id, "extraction",
                 "No text could be recovered from this document after two attempts.",
                 detail={"warnings": extraction.warnings if extraction else []},
             )
-            return None, None
+            return None
 
-        self.store.update_candidate(
-            candidate_id, extraction_json=extraction.model_dump_json()
-        )
+        self.store.update_candidate(candidate_id, extraction_json=extraction.model_dump_json())
         self.store.audit(
-            job_id, "extraction", "extracted",
+            batch_id, "extraction", "extracted",
             candidate_id=candidate_id,
             detail={"backend": extraction.backend, "chars": extraction.char_count, "ocr": extraction.ocr_used},
         )
@@ -281,11 +214,11 @@ class PipelineRunner:
         try:
             resume = structure_resume(extraction, self.client)
         except StructuringError as exc:
-            self._dead_letter(job_id, candidate_id, "structuring", str(exc))
-            return None, None
+            self._dead_letter(batch_id, candidate_id, "structuring", str(exc))
+            return None
         self.store.update_candidate(candidate_id, structured_json=resume.model_dump_json())
         self.store.audit(
-            job_id, "structuring", "structured",
+            batch_id, "structuring", "structured",
             candidate_id=candidate_id,
             detail={
                 "skills": len(resume.skills),
@@ -300,63 +233,199 @@ class PipelineRunner:
         try:
             profile = anonymize_resume(resume, self.client, candidate_ref=ref)
         except AnonymizationError as exc:
-            # Fail closed: identity must never reach ranking.
-            self._fail(job_id, candidate_id, "anonymization", str(exc))
-            return None, None
-        self.store.update_candidate(candidate_id, anonymized_json=profile.model_dump_json())
+            # Fail closed: identity must never reach a run.
+            self._fail(batch_id, candidate_id, "anonymization", str(exc))
+            return None
+        self.store.update_candidate(
+            candidate_id, anonymized_json=profile.model_dump_json(), status=CandidateStatus.READY.value
+        )
         self.store.audit_many([
-            (job_id, candidate_id, "anonymization", "redaction",
+            (batch_id, None, candidate_id, "anonymization", "redaction",
              {"field": r.field, "action": r.action, "reason": r.reason})
             for r in profile.redactions
         ])
+        return profile
 
-        # --- screen ---
-        result = self._screen_profile(job_id, candidate_id, profile, rule_set)
-        return profile, result
+    # ==================================================================
+    # Runs: rules, screening, ranking
+    # ==================================================================
 
-    def _screen_profile(self, job_id: str, candidate_id: str, profile: AnonymizedProfile, rule_set) -> ScreeningResult:
-        """Screen one anonymized profile and record every outcome."""
-        self.store.update_candidate(candidate_id, status=CandidateStatus.SCREENING.value)
-        result = screen(profile, rule_set, self._judge_for(job_id, candidate_id))
-        self.store.update_candidate(candidate_id, screening_json=json.dumps(result.to_dict(), default=str))
-        self.store.audit_many([
-            (job_id, candidate_id, "screening",
-             {True: "rule_passed", False: "rule_failed", None: "rule_indeterminate"}[outcome.passed],
-             {"rule_id": outcome.rule_id, "rule": outcome.source_text, "dsl": outcome.dsl,
-              "fields": outcome.fields, "observed": outcome.observed, "reason": outcome.reason})
-            for outcome in result.outcomes
-        ])
+    def create_run(
+        self,
+        batch_id: str,
+        role: RoleSpec,
+        *,
+        run_id: str | None = None,
+        name: str | None = None,
+    ) -> str:
+        """Register an analysis run over a finished batch."""
+        batch = self.store.get_batch(batch_id)
+        if batch is None:
+            raise KeyError(f"unknown batch {batch_id!r}")
+        if batch["status"] != BatchStatus.COMPLETE.value:
+            raise BatchNotReady(
+                f"batch {batch_id!r} is {batch['status']}; wait for ingestion to finish"
+            )
+        run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        self.store.create_run(run_id, batch_id, role.model_dump(mode="json"), name=name)
+        self.store.audit(
+            batch_id, "runs", "run_created",
+            run_id=run_id,
+            detail={"run_id": run_id, "name": name, "role": role.title, "candidates": batch["ready"]},
+        )
+        return run_id
 
-        if not result.eligible:
-            self.store.update_candidate(candidate_id, status=CandidateStatus.COMPLETE.value)
-        elif result.needs_manual_review:
-            self.store.update_candidate(candidate_id, status=CandidateStatus.NEEDS_MANUAL_REVIEW.value)
-        else:
-            self.store.update_candidate(candidate_id, status=CandidateStatus.COMPLETE.value)
-        return result
+    def execute_run(
+        self,
+        run_id: str,
+        rule_texts: Sequence[str] = (),
+        plan: str | None = None,
+        rules_from: str | None = None,
+    ) -> dict[str, Any]:
+        """Compile the run's rules, screen the batch and cut a shortlist.
+
+        Blocking; callers run it in a background task. `rules_from` reuses
+        another run's compiled rule set as-is — the rules a recruiter refined
+        on one analysis applied to the next — instead of compiling the plan.
+        """
+        run = self._require_run(run_id)
+        role = RoleSpec.model_validate(run["role"])
+        batch_id = run["batch_id"]
+
+        self.store.update_run(run_id, status=RunStatus.RUNNING.value)
+        try:
+            if rules_from:
+                rule_set = self._copy_rules(run_id, batch_id, rules_from)
+            else:
+                rule_set = self._compile_rules(run_id, batch_id, rule_texts, role, plan)
+            profiles, screening = self._screen_run(run_id, batch_id, rule_set)
+            shortlist = self._rank(run_id, batch_id, role, profiles, screening, rule_set)
+        except Exception as exc:  # a run failure must be visible, not silent
+            log.exception("run %s failed", run_id)
+            self.store.update_run(run_id, status=RunStatus.FAILED.value, error=str(exc))
+            self.store.audit(batch_id, "runs", "run_failed", run_id=run_id, detail={"error": str(exc)})
+            raise
+
+        self.store.update_run(run_id, status=RunStatus.COMPLETE.value, error=None)
+        self.store.audit(
+            batch_id, "runs", "run_complete",
+            run_id=run_id,
+            detail={"shortlisted": len(shortlist.entries), "excluded": len(shortlist.excluded),
+                    "manual_review": len(shortlist.manual_review)},
+        )
+        return shortlist.model_dump(mode="json")
+
+    def rescreen(self, run_id: str) -> dict[str, Any]:
+        """Re-run screening and ranking with the run's current rule set.
+
+        Extraction, structuring and anonymization are not repeated: the batch's
+        stored anonymized profiles are screened again in place.
+        """
+        run = self._require_run(run_id)
+        role = RoleSpec.model_validate(run["role"])
+        batch_id = run["batch_id"]
+        rule_set = self.rule_set_for(run_id)
+
+        self.store.update_run(run_id, status=RunStatus.RUNNING.value)
+        self.store.audit(
+            batch_id, "runs", "rescreen_started", run_id=run_id,
+            detail={"applied": len(rule_set.applied)},
+        )
+        try:
+            profiles, screening = self._screen_run(run_id, batch_id, rule_set)
+            shortlist = self._rank(run_id, batch_id, role, profiles, screening, rule_set)
+        except Exception as exc:
+            log.exception("rescreen of %s failed", run_id)
+            self.store.update_run(run_id, status=RunStatus.FAILED.value, error=str(exc))
+            self.store.audit(batch_id, "runs", "run_failed", run_id=run_id, detail={"error": str(exc)})
+            raise
+
+        self.store.update_run(run_id, status=RunStatus.COMPLETE.value, error=None)
+        self.store.audit(
+            batch_id, "runs", "rescreen_complete",
+            run_id=run_id,
+            detail={"candidates": len(profiles), "shortlisted": len(shortlist.entries),
+                    "excluded": len(shortlist.excluded)},
+        )
+        return shortlist.model_dump(mode="json")
 
     # ------------------------------------------------------------------
-    # Changing the rules of a finished job
+    # Rules
     # ------------------------------------------------------------------
 
-    def rule_set_for(self, job_id: str) -> RuleSet:
-        job = self.store.get_job(job_id)
-        if job is None:
-            raise KeyError(f"unknown job {job_id!r}")
-        return RuleSet.model_validate(job["rules"]) if job["rules"] else RuleSet()
+    def _compile_rules(
+        self, run_id: str, batch_id: str, rule_texts: Sequence[str], role: RoleSpec, plan: str | None
+    ) -> RuleSet:
+        rule_set = compile_plan(plan, self.client, rule_texts=list(rule_texts), role_context=role.title)
+        self.store.update_run(run_id, rules_json=rule_set.model_dump_json())
 
-    def add_rule(self, job_id: str, text: str) -> ClassifiedRule:
-        """Check a rule against the law and, if it is not high risk, add it to the job.
+        entries = [(
+            batch_id, run_id, None, "rules", "plan_compiled",
+            {
+                "plan": rule_set.source_plan,
+                "reasoning": rule_set.reasoning,
+                "rules": len(rule_set.rules),
+                "applied": len(rule_set.applied),
+                "flagged": len(rule_set.flagged),
+            },
+        )]
+        for rule in rule_set.rules:
+            entries.append((
+                batch_id, run_id, None, "rules",
+                f"rule_{rule.verdict.value}",
+                {
+                    "rule_id": rule.id,
+                    "text": rule.source_text,
+                    "kind": rule.kind,
+                    "risk": rule.risk.value,
+                    "dsl": rule.dsl,
+                    "clause": rule.clause.model_dump(mode="json") if rule.clause else None,
+                    "justification": rule.justification,
+                    "notes": rule.notes,
+                },
+            ))
+            for finding in rule.findings:
+                entries.append((
+                    batch_id, run_id, None, "rules", "rule_risk_flagged",
+                    {
+                        "rule_id": rule.id,
+                        "text": rule.source_text,
+                        "pattern": finding.pattern_id,
+                        "risk": finding.risk.value,
+                        "protected_attributes": finding.protected_attributes,
+                        "statutes": finding.statutes,
+                        "explanation": finding.explanation,
+                        "suggested_rewrite": finding.suggested_rewrite,
+                    },
+                ))
+        self.store.audit_many(entries)
+        return rule_set
+
+    def _copy_rules(self, run_id: str, batch_id: str, source_run_id: str) -> RuleSet:
+        rule_set = self.rule_set_for(source_run_id)
+        self.store.update_run(run_id, rules_json=rule_set.model_dump_json())
+        self.store.audit(
+            batch_id, "rules", "rules_copied",
+            run_id=run_id,
+            detail={"from_run": source_run_id, "rules": len(rule_set.rules),
+                    "applied": len(rule_set.applied), "flagged": len(rule_set.flagged)},
+        )
+        return rule_set
+
+    def rule_set_for(self, run_id: str) -> RuleSet:
+        run = self._require_run(run_id)
+        return RuleSet.model_validate(run["rules"]) if run["rules"] else RuleSet()
+
+    def add_rule(self, run_id: str, text: str) -> ClassifiedRule:
+        """Check a rule against the law and, if it is not high risk, add it to the run.
 
         A high-risk rule is never added: the ClassifiedRule with its findings
         and rewrite is raised inside RuleRejected so the caller can show the
         recommendation. The caller decides when to rescreen.
         """
-        job = self.store.get_job(job_id)
-        if job is None:
-            raise KeyError(f"unknown job {job_id!r}")
-        role = RoleSpec.model_validate(job["role"])
-        rule_set = self.rule_set_for(job_id)
+        run = self._require_run(run_id)
+        role = RoleSpec.model_validate(run["role"])
+        rule_set = self.rule_set_for(run_id)
         taken = {rule.id for rule in rule_set.rules}
         index = len(rule_set.rules) + 1
         while f"rule_{index}" in taken:
@@ -364,98 +433,118 @@ class PipelineRunner:
         rule = classify_rule(text, self.client, role_context=role.title, rule_id=f"rule_{index}")
         if rule.risk is RiskLevel.HIGH:
             self.store.audit(
-                job_id, "rules", "rule_rejected",
+                run["batch_id"], "rules", "rule_rejected",
+                run_id=run_id,
                 detail={"text": rule.source_text, "risk": rule.risk.value,
                         "findings": [f.model_dump(mode="json") for f in rule.findings]},
             )
             raise RuleRejected(rule)
         rule_set.rules.append(rule)
-        self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
+        self.store.update_run(run_id, rules_json=rule_set.model_dump_json())
         self.store.audit(
-            job_id, "rules", "rule_added",
-            detail={"rule_id": rule.id, "text": rule.source_text, "kind": rule.kind, "verdict": rule.verdict.value,
-                    "risk": rule.risk.value, "dsl": rule.dsl, "notes": rule.notes},
+            run["batch_id"], "rules", "rule_added",
+            run_id=run_id,
+            detail={"rule_id": rule.id, "text": rule.source_text, "kind": rule.kind,
+                    "verdict": rule.verdict.value, "risk": rule.risk.value, "dsl": rule.dsl,
+                    "notes": rule.notes},
         )
         return rule
 
-    def remove_rule(self, job_id: str, rule_id: str) -> ClassifiedRule:
-        rule_set = self.rule_set_for(job_id)
+    def remove_rule(self, run_id: str, rule_id: str) -> ClassifiedRule:
+        run = self._require_run(run_id)
+        rule_set = self.rule_set_for(run_id)
         rule = next((r for r in rule_set.rules if r.id == rule_id), None)
         if rule is None:
-            raise KeyError(f"job {job_id!r} has no rule {rule_id!r}")
+            raise KeyError(f"run {run_id!r} has no rule {rule_id!r}")
         rule_set.rules = [r for r in rule_set.rules if r.id != rule_id]
-        self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
-        self.store.audit(job_id, "rules", "rule_removed", detail={"rule_id": rule_id, "text": rule.source_text})
+        self.store.update_run(run_id, rules_json=rule_set.model_dump_json())
+        self.store.audit(
+            run["batch_id"], "rules", "rule_removed",
+            run_id=run_id, detail={"rule_id": rule_id, "text": rule.source_text},
+        )
         return rule
 
-    def rescreen(self, job_id: str) -> dict[str, Any]:
-        """Re-run screening and ranking over the job's stored anonymized profiles.
+    # ------------------------------------------------------------------
+    # Screening and ranking
+    # ------------------------------------------------------------------
 
-        Extraction, structuring and anonymization are not repeated; the rule
-        set as currently stored is applied to every candidate that has an
-        anonymized profile, and the shortlist is rebuilt.
-        """
-        job = self.store.get_job(job_id)
-        if job is None:
-            raise KeyError(f"unknown job {job_id!r}")
-        role = RoleSpec.model_validate(job["role"])
-        rule_set = self.rule_set_for(job_id)
-        self.store.update_job(job_id, status=JobStatus.RUNNING.value)
-        self.store.audit(job_id, "rules", "rescreen_started", detail={"applied": len(rule_set.applied)})
+    def _screen_run(
+        self, run_id: str, batch_id: str, rule_set
+    ) -> tuple[list[AnonymizedProfile], dict[str, ScreeningResult]]:
+        """Screen every ready profile in the batch against this run's rules."""
+        ready = [
+            candidate
+            for candidate in self.store.list_candidates(batch_id)
+            if candidate["status"] == CandidateStatus.READY.value and candidate.get("anonymized")
+        ]
+        self.store.clear_results(run_id)
 
-        try:
-            stored = [
-                candidate for candidate in self.store.list_candidates(job_id)
-                if candidate.get("anonymized") and candidate.get("candidate_ref")
-            ]
+        def one(candidate: dict[str, Any]) -> tuple[AnonymizedProfile, ScreeningResult]:
+            profile = AnonymizedProfile.model_validate(candidate["anonymized"])
+            return profile, self._screen_profile(run_id, batch_id, candidate["id"], profile, rule_set)
 
-            def one(candidate):
-                profile = AnonymizedProfile.model_validate(candidate["anonymized"])
-                return profile, self._screen_profile(job_id, candidate["id"], profile, rule_set)
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            results = list(pool.map(one, ready))
 
-            with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                results = list(pool.map(one, stored))
-            profiles = [profile for profile, _ in results]
-            screening = {result.candidate_ref: result for _, result in results}
-            shortlist = self._rank(job_id, role, profiles, screening, rule_set)
-        except Exception as exc:
-            log.exception("rescreen of %s failed", job_id)
-            self.store.update_job(job_id, status=JobStatus.FAILED.value, error=str(exc))
-            self.store.audit(job_id, "job", "job_failed", detail={"error": str(exc)})
-            raise
+        profiles = [profile for profile, _ in results]
+        screening = {result.candidate_ref: result for _, result in results}
+        return profiles, screening
 
-        self.store.update_job(job_id, status=JobStatus.COMPLETE.value, error=None)
-        self.store.audit(
-            job_id, "rules", "rescreen_complete",
-            detail={"candidates": len(profiles), "shortlisted": len(shortlist.entries), "excluded": len(shortlist.excluded)},
+    def _screen_profile(
+        self, run_id: str, batch_id: str, candidate_id: str, profile: AnonymizedProfile, rule_set
+    ) -> ScreeningResult:
+        """Screen one anonymized profile and record the outcome on the run."""
+        result = screen(profile, rule_set, self._judge_for(batch_id, run_id, candidate_id))
+        if not result.eligible:
+            outcome = CandidateOutcome.EXCLUDED
+        elif result.needs_manual_review:
+            outcome = CandidateOutcome.NEEDS_MANUAL_REVIEW
+        else:
+            outcome = CandidateOutcome.ELIGIBLE
+        self.store.put_result(
+            run_id, candidate_id, profile.candidate_ref, outcome.value,
+            screening=json.loads(json.dumps(result.to_dict(), default=str)),
         )
-        return shortlist.model_dump(mode="json")
+        self.store.audit_many([
+            (batch_id, run_id, candidate_id, "screening",
+             {True: "rule_passed", False: "rule_failed", None: "rule_indeterminate"}[outcome_row.passed],
+             {"rule_id": outcome_row.rule_id, "rule": outcome_row.source_text, "dsl": outcome_row.dsl,
+              "fields": outcome_row.fields, "observed": outcome_row.observed, "reason": outcome_row.reason})
+            for outcome_row in result.outcomes
+        ])
+        return result
 
-    def _judge_for(self, job_id: str, candidate_id: str | None, *, ensemble: bool | None = None) -> Judge:
+    def _judge_for(
+        self, batch_id: str, run_id: str, candidate_id: str | None, *, ensemble: bool | None = None
+    ) -> Judge:
         """A judge for ASK clauses that writes every model check to the audit trail.
 
         Requirements use the ensemble so a model-judged exclusion needs agreement;
         preferences take a single answer because they only order candidates.
         """
+        refs = self._refs_to_ids(batch_id) if candidate_id is None else {}
+
         def record(result, profile):
             self.store.audit(
-                job_id, "screening", "model_check",
-                candidate_id=candidate_id or self._candidate_id_for(job_id, profile.candidate_ref),
+                batch_id, "screening", "model_check",
+                run_id=run_id,
+                candidate_id=candidate_id or refs.get(profile.candidate_ref),
                 detail={"candidate_ref": profile.candidate_ref, **result.to_dict()},
             )
 
         return Judge(self.client, ensemble=self.use_ensemble if ensemble is None else ensemble, on_check=record)
 
-    def _rank(self, job_id, role, profiles, screening, rule_set=None):
+    def _rank(self, run_id, batch_id, role, profiles, screening, rule_set=None):
         eligible = [
             profile for profile in profiles
             if screening.get(profile.candidate_ref) and screening[profile.candidate_ref].eligible
         ]
         criteria = criteria_for(rule_set)
         # Preferences only order candidates, so a single answer per ASK suffices.
-        judge = self._judge_for(job_id, None, ensemble=False)
+        judge = self._judge_for(batch_id, run_id, None, ensemble=False)
         self.store.audit(
-            job_id, "ranking", "triage_started",
+            batch_id, "ranking", "triage_started",
+            run_id=run_id,
             detail={
                 "eligible": len(eligible),
                 "screened": len(profiles),
@@ -463,14 +552,16 @@ class PipelineRunner:
             },
         )
         scores = triage_rank(eligible, role, self.client, criteria=criteria, judge=judge) if eligible else []
-        scores = self._ensemble(job_id, role, scores, eligible, screening, criteria, judge)
+        scores = self._ensemble(run_id, batch_id, role, scores, eligible, screening, criteria, judge)
 
+        refs = self._refs_to_ids(batch_id)
         for score in scores:
-            candidate_id = self._candidate_id_for(job_id, score.candidate_ref)
+            candidate_id = refs.get(score.candidate_ref)
             if candidate_id:
-                self.store.update_candidate(candidate_id, score_json=score.model_dump_json())
+                self.store.set_result_score(run_id, candidate_id, score.model_dump(mode="json"))
             self.store.audit(
-                job_id, "ranking", "scored",
+                batch_id, "ranking", "scored",
+                run_id=run_id,
                 candidate_id=candidate_id,
                 detail={
                     "candidate_ref": score.candidate_ref,
@@ -482,10 +573,10 @@ class PipelineRunner:
             )
 
         shortlist = build_shortlist(scores, role, screening=screening)
-        self.store.update_job(job_id, shortlist_json=shortlist.model_dump_json())
+        self.store.update_run(run_id, shortlist_json=shortlist.model_dump_json())
         return shortlist
 
-    def _ensemble(self, job_id, role, scores, eligible, screening, criteria, judge):
+    def _ensemble(self, run_id, batch_id, role, scores, eligible, screening, criteria, judge):
         """Re-score only the candidates whose placement is genuinely in doubt."""
         if not self.use_ensemble or not scores:
             return scores
@@ -498,12 +589,13 @@ class PipelineRunner:
         }
         targets = borderline | (ambiguous & {score.candidate_ref for score in scores})
         if not targets:
-            self.store.audit(job_id, "ranking", "ensemble_skipped",
+            self.store.audit(batch_id, "ranking", "ensemble_skipped", run_id=run_id,
                              detail={"reason": "no borderline or ambiguous candidates"})
             return scores
 
         self.store.audit(
-            job_id, "ranking", "ensemble_started",
+            batch_id, "ranking", "ensemble_started",
+            run_id=run_id,
             detail={
                 "candidates": sorted(targets),
                 "borderline": sorted(borderline),
@@ -517,6 +609,7 @@ class PipelineRunner:
             scores, profiles_by_ref, role, self.client, targets, criteria=criteria, judge=judge
         )
 
+        refs = self._refs_to_ids(batch_id)
         for score in rescored:
             if score.pass_name != "ensemble" or not score.ensemble_votes:
                 continue
@@ -524,9 +617,10 @@ class PipelineRunner:
                 (vote["summary"] for vote in score.ensemble_votes if "summary" in vote), {}
             )
             self.store.audit(
-                job_id, "ranking",
+                batch_id, "ranking",
                 "ensemble_tiebreak" if not summary.get("unanimous", True) else "ensemble_agreed",
-                candidate_id=self._candidate_id_for(job_id, score.candidate_ref),
+                run_id=run_id,
+                candidate_id=refs.get(score.candidate_ref),
                 detail={
                     "candidate_ref": score.candidate_ref,
                     "votes": [vote for vote in score.ensemble_votes if "summary" not in vote],
@@ -536,28 +630,35 @@ class PipelineRunner:
         return rescored
 
     # ------------------------------------------------------------------
-    # Failure paths
+    # Helpers and failure paths
     # ------------------------------------------------------------------
 
-    def _candidate_id_for(self, job_id: str, candidate_ref: str) -> str | None:
-        for candidate in self.store.list_candidates(job_id):
-            if candidate["candidate_ref"] == candidate_ref:
-                return candidate["id"]
-        return None
+    def _require_run(self, run_id: str) -> dict[str, Any]:
+        run = self.store.get_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown run {run_id!r}")
+        return run
+
+    def _refs_to_ids(self, batch_id: str) -> dict[str, str]:
+        return {
+            candidate["candidate_ref"]: candidate["id"]
+            for candidate in self.store.list_candidates(batch_id)
+            if candidate["candidate_ref"]
+        }
 
     def _dead_letter(
-        self, job_id: str, candidate_id: str, stage: str, reason: str, detail: dict | None = None
+        self, batch_id: str, candidate_id: str, stage: str, reason: str, detail: dict | None = None
     ) -> None:
         """Route to manual review. Not a rejection — nobody has assessed them."""
         self.store.update_candidate(
             candidate_id, status=CandidateStatus.NEEDS_MANUAL_REVIEW.value, error=reason
         )
         self.store.audit(
-            job_id, stage, "dead_lettered",
+            batch_id, stage, "dead_lettered",
             candidate_id=candidate_id,
             detail={"reason": reason, **(detail or {})},
         )
 
-    def _fail(self, job_id: str, candidate_id: str, stage: str, reason: str) -> None:
+    def _fail(self, batch_id: str, candidate_id: str, stage: str, reason: str) -> None:
         self.store.update_candidate(candidate_id, status=CandidateStatus.FAILED.value, error=reason)
-        self.store.audit(job_id, stage, "failed", candidate_id=candidate_id, detail={"reason": reason})
+        self.store.audit(batch_id, stage, "failed", candidate_id=candidate_id, detail={"reason": reason})

@@ -1,9 +1,16 @@
 """HTTP API.
 
-Backend only — this exposes the pipeline for a separate frontend to drive. The
-upload endpoint returns a job id immediately and the work continues in a
-background worker, so a bulk upload never blocks the caller. `/jobs/{id}/status`
-is the polling endpoint behind a progress view.
+Backend only — this exposes the pipeline for a separate frontend to drive.
+
+Two resources, because they are two different things. A **batch** is a set of
+resumes: uploaded once, extracted, structured and de-identified once. An
+**analysis run** applies one rule set to a batch and owns the screening
+outcomes, the scores and the shortlist, so a batch can carry many runs and a
+second analysis never overwrites the first.
+
+Creating a batch or a run returns immediately and the work continues in a
+background worker; `GET /batches/{id}` and `GET /runs/{id}` are the polling
+endpoints behind the progress views.
 """
 
 from __future__ import annotations
@@ -31,13 +38,13 @@ from rescan.ingest import (
     ObjectStoreError,
     build_object_store,
     expand_uploads,
-    pull_job_documents,
+    pull_batch_documents,
 )
 from rescan.llm.client import build_client
 from rescan.pipeline.query import QueryRejected, run_query
-from rescan.pipeline.runner import PipelineRunner, RuleRejected
+from rescan.pipeline.runner import BatchNotReady, PipelineRunner, RuleRejected
 from rescan.rules.classifier import classify_rule, compile_plan
-from rescan.schemas import RoleSpec
+from rescan.schemas import BatchStatus, RoleSpec, RunStatus
 from rescan.store import Store
 
 log = logging.getLogger(__name__)
@@ -152,13 +159,19 @@ class DslParseRequest(BaseModel):
     dsl: str = Field(description="A rule program (REQUIRE/PREFER clauses) or a bare query expression.")
 
 
-class BucketJobRequest(BaseModel):
-    job_id: str = Field(description="The job's folder in the bucket: objects under <prefix>/<job_id>/ are pulled.")
+class BucketBatchRequest(BaseModel):
+    batch_id: str = Field(description="The batch's folder in the bucket: objects under <prefix>/<batch_id>/ are pulled.")
+    name: str | None = Field(default=None, description="A human label for the batch.")
+    prefix: str | None = Field(default=None, description="Override the configured bucket prefix.")
+
+
+class RunRequest(BaseModel):
+    batch_id: str = Field(description="The batch of resumes to analyse.")
     role: RoleSpec
-    plan: str | None = Field(default=None, description="The recruiter's hiring plan, free text.")
+    name: str | None = Field(default=None, description="A human label for this analysis run.")
+    plan: str | None = Field(default=None, description="The recruiter's hiring plan, free text; compiled into rules.")
     rules: list[str] = Field(default_factory=list, description="Discrete rules, in addition to or instead of the plan.")
-    prefix: str | None = Field(default=None, description="Override the configured bucket prefix for this job.")
-    rules_from: str | None = Field(default=None, description="Reuse another round's compiled rule set instead of compiling the plan.")
+    rules_from: str | None = Field(default=None, description="Reuse another run's compiled rule set instead of compiling the plan.")
 
 
 class RuleAddRequest(BaseModel):
@@ -170,15 +183,6 @@ class QueryRequest(BaseModel):
     model_checks: bool = Field(default=True, description="Whether ASK clauses are put to the model. Off, they evaluate to unknown.")
 
 
-class JobStatusResponse(BaseModel):
-    job_id: str
-    status: str
-    counts: dict[str, int]
-    total: int
-    processed: int
-    created_at: str
-    updated_at: str
-    error: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -260,7 +264,7 @@ def compile_hiring_plan(request: PlanCompileRequest) -> dict[str, Any]:
     The model reasons over the plan with the legal standing in front of it and
     writes one clause per requirement; its reasoning comes back alongside the
     rules so a reviewer can see how each arose. Nothing is run against
-    candidates here — pass the same plan to POST /jobs to screen a batch.
+    candidates here — pass the same plan to POST /runs to screen a batch.
     """
     if not (request.plan and request.plan.strip()) and not any(r.strip() for r in request.rules):
         raise HTTPException(status_code=400, detail="no plan or rules supplied")
@@ -311,61 +315,43 @@ def check_one_rule(text: str = Form(...), role_context: str | None = Form(None))
     return classify_rule(text, state.runner.client, role_context=role_context).model_dump(mode="json")
 
 
-@app.post("/jobs", status_code=202)
-async def create_job(
-    files: list[UploadFile] = File(..., description="Resumes, or a zip archive of them."),
-    role: str = Form(..., description="RoleSpec as JSON."),
-    rules: str = Form("[]", description="Recruiter rules as a JSON array of strings."),
-    plan: str | None = Form(None, description="The recruiter's hiring plan, free text; compiled into rules."),
-    rules_from: str | None = Form(None, description="Reuse another round's compiled rule set instead of compiling the plan."),
-) -> dict[str, Any]:
-    """Accept a bulk upload and start processing. Returns a job id immediately."""
-    try:
-        role_spec = RoleSpec.model_validate_json(role)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"invalid role: {exc}") from exc
-    try:
-        rule_texts = json.loads(rules)
-        if not isinstance(rule_texts, list):
-            raise ValueError("rules must be a JSON array of strings")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"invalid rules: {exc}") from exc
+# --------------------------------------------------------------------------
+# Batches: resumes in, anonymized profiles out
+# --------------------------------------------------------------------------
 
+
+@app.post("/batches", status_code=202)
+async def create_batch(
+    files: list[UploadFile] = File(..., description="Resumes, or a zip archive of them."),
+    name: str | None = Form(None, description="A human label for the batch."),
+) -> dict[str, Any]:
+    """Accept a bulk upload and start ingesting. Returns a batch id immediately."""
     uploads = [(upload.filename or "unnamed", await upload.read()) for upload in files]
     documents = expand_uploads(uploads)
     if not documents:
         raise HTTPException(status_code=400, detail="no usable documents in the upload")
 
-    if rules_from and state.store.get_job(rules_from) is None:
-        raise HTTPException(status_code=404, detail=f"unknown job {rules_from!r} to copy rules from")
-    job_id = state.runner.create_job(role_spec, documents)
-    state.pool.submit(_run_job_safely, job_id, rule_texts, plan, rules_from)
-
-    return {
-        "job_id": job_id,
-        "accepted_documents": len(documents),
-        "status_url": f"/jobs/{job_id}/status",
-    }
+    batch_id = state.runner.create_batch(documents, name=name, source={"kind": "upload"})
+    state.pool.submit(_process_batch_safely, batch_id)
+    return {"batch_id": batch_id, "accepted_documents": len(documents), "status_url": f"/batches/{batch_id}"}
 
 
-@app.post("/jobs/from-bucket", status_code=202)
-def create_job_from_bucket(request: BucketJobRequest) -> dict[str, Any]:
-    """Start a job from resumes already in the object store.
+@app.post("/batches/from-bucket", status_code=202)
+def create_batch_from_bucket(request: BucketBatchRequest) -> dict[str, Any]:
+    """Start a batch from resumes already in the object store.
 
-    Objects under `<prefix>/<job_id>/` are pulled, archives expanded, and the
-    job runs exactly as an upload would. The bucket's job id becomes the
-    Rescan job id so the frontend can correlate the two without a mapping.
+    Objects under `<prefix>/<batch_id>/` are pulled and ingested. The bucket's
+    folder name becomes the batch id so the frontend can correlate the two
+    without a mapping.
     """
-    job_id = request.job_id.strip().strip("/")
-    if not job_id or "/" in job_id or job_id.startswith("."):
-        raise HTTPException(status_code=400, detail="job_id must be a single path segment")
-    if state.store.get_job(job_id) is not None:
-        raise HTTPException(status_code=409, detail=f"job {job_id!r} already exists")
-    if request.rules_from and state.store.get_job(request.rules_from) is None:
-        raise HTTPException(status_code=404, detail=f"unknown job {request.rules_from!r} to copy rules from")
+    batch_id = request.batch_id.strip().strip("/")
+    if not batch_id or "/" in batch_id or batch_id.startswith("."):
+        raise HTTPException(status_code=400, detail="batch_id must be a single path segment")
+    if state.store.get_batch(batch_id) is not None:
+        raise HTTPException(status_code=409, detail=f"batch {batch_id!r} already exists")
 
     try:
-        pull = pull_job_documents(state.object_store, job_id, prefix=request.prefix)
+        pull = pull_batch_documents(state.object_store, batch_id, prefix=request.prefix)
     except ObjectStoreError as exc:
         raise HTTPException(status_code=502, detail=f"object store error: {exc}") from exc
     if not pull.documents:
@@ -374,9 +360,12 @@ def create_job_from_bucket(request: BucketJobRequest) -> dict[str, Any]:
             detail={"message": f"no usable documents under {pull.prefix!r}", "skipped": pull.skipped},
         )
 
-    state.runner.create_job(request.role, pull.documents, job_id=job_id)
+    state.runner.create_batch(
+        pull.documents, batch_id=batch_id, name=request.name,
+        source={"kind": "bucket", "prefix": pull.prefix},
+    )
     state.store.audit(
-        job_id, "ingestion", "bucket_pulled",
+        batch_id, "ingestion", "bucket_pulled",
         detail={
             "store": getattr(state.object_store, "name", settings.object_store),
             "prefix": pull.prefix,
@@ -386,90 +375,169 @@ def create_job_from_bucket(request: BucketJobRequest) -> dict[str, Any]:
             "skipped": pull.skipped,
         },
     )
-    state.pool.submit(_run_job_safely, job_id, request.rules, request.plan, request.rules_from)
+    state.pool.submit(_process_batch_safely, batch_id)
     return {
-        "job_id": job_id,
+        "batch_id": batch_id,
         "prefix": pull.prefix,
         "accepted_documents": len(pull.documents),
         "skipped": pull.skipped,
-        "status_url": f"/jobs/{job_id}/status",
+        "status_url": f"/batches/{batch_id}",
     }
 
 
-def _run_job_safely(job_id: str, rule_texts: list[str], plan: str | None = None, rules_from: str | None = None) -> None:
+def _process_batch_safely(batch_id: str) -> None:
     try:
-        state.runner.run_job(job_id, rule_texts, plan=plan, rules_from=rules_from)
+        state.runner.process_batch(batch_id)
     except Exception:
-        # run_job already recorded the failure on the job and in the audit log.
-        log.exception("background job %s failed", job_id)
+        # process_batch already recorded the failure on the batch and in the audit log.
+        log.exception("background ingestion of batch %s failed", batch_id)
 
 
-@app.get("/jobs")
-def list_jobs(limit: int = 50) -> dict[str, Any]:
-    return {"jobs": state.store.list_jobs(limit=limit)}
+@app.get("/batches")
+def list_batches(limit: int = 50) -> dict[str, Any]:
+    return {"batches": state.store.list_batches(limit=limit)}
 
 
-@app.get("/jobs/{job_id}")
-def job_detail(job_id: str) -> dict[str, Any]:
-    """The job record: role, status, timestamps, whether a shortlist exists."""
-    job = _require_job(job_id)
-    counts = state.store.status_counts(job_id)
+@app.get("/batches/{batch_id}")
+def batch_detail(batch_id: str) -> dict[str, Any]:
+    """Ingestion progress and the analysis runs over this batch."""
+    batch = _require_batch(batch_id)
     return {
-        "job_id": job_id,
-        "status": job["status"],
-        "role": job["role"],
-        "created_at": job["created_at"],
-        "updated_at": job["updated_at"],
-        "error": job["error"],
-        "has_shortlist": job["shortlist"] is not None,
-        "has_rules": job["rules"] is not None,
-        "counts": counts,
-        "total": sum(counts.values()),
+        "batch_id": batch_id,
+        "name": batch["name"],
+        "status": batch["status"],
+        "counts": batch["counts"],
+        "total": batch["total"],
+        "ready": batch["ready"],
+        "source": batch["source"],
+        "runs": batch["runs"],
+        "created_at": batch["created_at"],
+        "updated_at": batch["updated_at"],
+        "error": batch["error"],
     }
 
 
-@app.get("/jobs/{job_id}/status", response_model=JobStatusResponse)
-def job_status(job_id: str) -> JobStatusResponse:
-    """Poll target for a progress view: per-status counts as they change."""
-    job = _require_job(job_id)
-    counts = state.store.status_counts(job_id)
-    total = sum(counts.values())
-    settled = {"complete", "failed", "needs_manual_review", "duplicate"}
-    return JobStatusResponse(
-        job_id=job_id,
-        status=job["status"],
-        counts=counts,
-        total=total,
-        processed=sum(count for status, count in counts.items() if status in settled),
-        created_at=job["created_at"],
-        updated_at=job["updated_at"],
-        error=job["error"],
-    )
+@app.get("/batches/{batch_id}/candidates")
+def batch_candidates(batch_id: str, include_identity: bool = False) -> dict[str, Any]:
+    """Per-document ingestion state. Identity is withheld by default."""
+    _require_batch(batch_id)
+    candidates = state.store.list_candidates(batch_id)
+    if not include_identity:
+        for candidate in candidates:
+            candidate.pop("structured", None)
+            candidate.pop("filename", None)
+    return {"candidates": candidates}
 
 
-@app.get("/jobs/{job_id}/rules")
-def job_rules(job_id: str) -> dict[str, Any]:
-    job = _require_job(job_id)
-    return job["rules"] or {"rules": []}
+@app.post("/batches/{batch_id}/query")
+def batch_query(batch_id: str, request: QueryRequest) -> dict[str, Any]:
+    """Run a query in the rule language over the batch's anonymized profiles.
+
+    Returns matched / not matched / indeterminate candidates, each with the
+    plain-language reason. Identity is never returned here. The query passes
+    the same legal gate as a rule and is written to the audit trail.
+    """
+    _require_batch(batch_id)
+    judge = state.runner._judge_for(batch_id, None, None, ensemble=False) if request.model_checks else None
+    try:
+        return run_query(state.store, batch_id, request.dsl, judge=judge)
+    except DslError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
+    except QueryRejected as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
 
 
-@app.post("/jobs/{job_id}/rules", status_code=202)
-def add_job_rule(job_id: str, request: RuleAddRequest) -> dict[str, Any]:
-    """Add a rule to a finished round and re-screen it.
+@app.get("/batches/{batch_id}/audit")
+def batch_audit(batch_id: str, candidate_id: str | None = None, limit: int = 2000) -> dict[str, Any]:
+    """Everything that happened to these documents, every run included."""
+    _require_batch(batch_id)
+    return {"entries": state.store.audit_trail(batch_id, candidate_id=candidate_id, limit=limit)}
+
+
+# --------------------------------------------------------------------------
+# Analysis runs: a rule set applied to a batch
+# --------------------------------------------------------------------------
+
+
+@app.post("/runs", status_code=202)
+def create_run(request: RunRequest) -> dict[str, Any]:
+    """Start an analysis run over a finished batch. Returns a run id immediately."""
+    if state.store.get_batch(request.batch_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown batch {request.batch_id!r}")
+    if request.rules_from and state.store.get_run(request.rules_from) is None:
+        raise HTTPException(status_code=404, detail=f"unknown run {request.rules_from!r} to copy rules from")
+    try:
+        run_id = state.runner.create_run(request.batch_id, request.role, name=request.name)
+    except BatchNotReady as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    state.pool.submit(_execute_run_safely, run_id, request.rules, request.plan, request.rules_from)
+    return {"run_id": run_id, "batch_id": request.batch_id, "status_url": f"/runs/{run_id}"}
+
+
+def _execute_run_safely(
+    run_id: str, rule_texts: list[str], plan: str | None = None, rules_from: str | None = None
+) -> None:
+    try:
+        state.runner.execute_run(run_id, rule_texts, plan=plan, rules_from=rules_from)
+    except Exception:
+        # execute_run already recorded the failure on the run and in the audit log.
+        log.exception("background run %s failed", run_id)
+
+
+@app.get("/runs")
+def list_runs(batch_id: str | None = None, q: str | None = None, limit: int = 50) -> dict[str, Any]:
+    """Run summaries, newest first. `q` searches id, name, role title and batch."""
+    return {"runs": state.store.list_runs(batch_id=batch_id, query=q, limit=limit)}
+
+
+@app.get("/runs/{run_id}")
+def run_detail(run_id: str) -> dict[str, Any]:
+    """Progress and outcome counts for one analysis run."""
+    run = _require_run(run_id)
+    batch = state.store.get_batch(run["batch_id"]) or {}
+    return {
+        "run_id": run_id,
+        "batch_id": run["batch_id"],
+        "batch_name": batch.get("name"),
+        "batch_status": batch.get("status"),
+        "name": run["name"],
+        "status": run["status"],
+        "role": run["role"],
+        "counts": run["counts"],
+        "screened": run["screened"],
+        "total": run["total"],
+        "has_shortlist": run["shortlist"] is not None,
+        "has_rules": run["rules"] is not None,
+        "created_at": run["created_at"],
+        "updated_at": run["updated_at"],
+        "error": run["error"],
+    }
+
+
+@app.get("/runs/{run_id}/rules")
+def run_rules(run_id: str) -> dict[str, Any]:
+    run = _require_run(run_id)
+    return run["rules"] or {"rules": []}
+
+
+@app.post("/runs/{run_id}/rules", status_code=202)
+def add_run_rule(run_id: str, request: RuleAddRequest) -> dict[str, Any]:
+    """Add a rule to a run and re-screen it.
 
     The rule is checked under the same legal review as the plan. If it is
     high risk it is not added: the response is a 422 carrying the finding,
     the statute and a measurable rewrite to use instead. Otherwise it is
-    compiled, added, and the round is re-screened and re-ranked in the
-    background from the stored anonymized profiles — nothing is re-extracted.
+    compiled, added, and the run is re-screened and re-ranked from the batch's
+    stored anonymized profiles — nothing is re-extracted.
     """
-    job = _require_job(job_id)
-    if job["status"] == "running":
-        raise HTTPException(status_code=409, detail=f"job {job_id!r} is still running")
+    run = _require_run(run_id)
+    if run["status"] == RunStatus.RUNNING.value:
+        raise HTTPException(status_code=409, detail=f"run {run_id!r} is still running")
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="empty rule")
     try:
-        rule = state.runner.add_rule(job_id, request.text)
+        rule = state.runner.add_rule(run_id, request.text)
     except RuleRejected as exc:
         raise HTTPException(
             status_code=422,
@@ -479,98 +547,90 @@ def add_job_rule(job_id: str, request: RuleAddRequest) -> dict[str, Any]:
                 "rule": exc.rule.model_dump(mode="json"),
             },
         ) from exc
-    state.pool.submit(_rescreen_safely, job_id)
-    return {"rule": rule.model_dump(mode="json"), "added": True, "rescreening": True, "status_url": f"/jobs/{job_id}/status"}
+    # Queue it before returning, so a client polling straight after the 202
+    # cannot read the previous screening's "complete".
+    state.store.update_run(run_id, status=RunStatus.QUEUED.value)
+    state.pool.submit(_rescreen_safely, run_id)
+    return {"rule": rule.model_dump(mode="json"), "added": True, "rescreening": True, "status_url": f"/runs/{run_id}"}
 
 
-@app.delete("/jobs/{job_id}/rules/{rule_id}", status_code=202)
-def remove_job_rule(job_id: str, rule_id: str) -> dict[str, Any]:
-    """Remove a rule from a round and re-screen it."""
-    job = _require_job(job_id)
-    if job["status"] == "running":
-        raise HTTPException(status_code=409, detail=f"job {job_id!r} is still running")
+@app.delete("/runs/{run_id}/rules/{rule_id}", status_code=202)
+def remove_run_rule(run_id: str, rule_id: str) -> dict[str, Any]:
+    """Remove a rule from a run and re-screen it."""
+    run = _require_run(run_id)
+    if run["status"] == RunStatus.RUNNING.value:
+        raise HTTPException(status_code=409, detail=f"run {run_id!r} is still running")
     try:
-        state.runner.remove_rule(job_id, rule_id)
+        state.runner.remove_rule(run_id, rule_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    state.pool.submit(_rescreen_safely, job_id)
-    return {"removed": rule_id, "rescreening": True, "status_url": f"/jobs/{job_id}/status"}
+    state.store.update_run(run_id, status=RunStatus.QUEUED.value)
+    state.pool.submit(_rescreen_safely, run_id)
+    return {"removed": rule_id, "rescreening": True, "status_url": f"/runs/{run_id}"}
 
 
-def _rescreen_safely(job_id: str) -> None:
+def _rescreen_safely(run_id: str) -> None:
     try:
-        state.runner.rescreen(job_id)
+        state.runner.rescreen(run_id)
     except Exception:
-        log.exception("rescreen of %s failed", job_id)
+        log.exception("rescreen of run %s failed", run_id)
 
 
-@app.get("/jobs/{job_id}/shortlist")
-def job_shortlist(job_id: str, reattach_identity: bool = True) -> dict[str, Any]:
+@app.get("/runs/{run_id}/shortlist")
+def run_shortlist(run_id: str, reattach_identity: bool = True) -> dict[str, Any]:
     """The shortlist, with identity re-attached for the human reviewer.
 
     Full anonymization is correct for the machine passes but backfires for human
     reviewers, so names come back at this step. Pass reattach_identity=false to
     review the anonymized view.
     """
-    job = _require_job(job_id)
-    shortlist = job["shortlist"]
+    run = _require_run(run_id)
+    shortlist = run["shortlist"]
     if shortlist is None:
-        raise HTTPException(status_code=409, detail=f"job {job_id} has no shortlist yet")
+        raise HTTPException(status_code=409, detail=f"run {run_id!r} has no shortlist yet")
     if not reattach_identity:
         return shortlist
 
     identities = {
         candidate["candidate_ref"]: (candidate.get("structured") or {}).get("identity", {})
-        for candidate in state.store.list_candidates(job_id)
+        for candidate in state.store.list_candidates(run["batch_id"])
         if candidate.get("candidate_ref")
     }
-    for section in ("entries", "below_cutoff"):
-        for entry in shortlist.get(section, []):
-            entry["identity"] = identities.get(entry["candidate_ref"])
-    for section in ("excluded", "manual_review"):
+    for section in ("entries", "below_cutoff", "excluded", "manual_review"):
         for entry in shortlist.get(section, []):
             entry["identity"] = identities.get(entry["candidate_ref"])
     return shortlist
 
 
-@app.get("/jobs/{job_id}/candidates")
-def job_candidates(job_id: str, include_identity: bool = False) -> dict[str, Any]:
-    _require_job(job_id)
-    candidates = state.store.list_candidates(job_id)
-    if not include_identity:
-        for candidate in candidates:
-            candidate.pop("structured", None)
-            candidate.pop("filename", None)
-    return {"candidates": candidates}
+@app.get("/runs/{run_id}/candidates")
+def run_candidates(run_id: str) -> dict[str, Any]:
+    """What this run concluded about each candidate. Identity is never included."""
+    _require_run(run_id)
+    return {"results": state.store.list_results(run_id)}
 
 
-@app.post("/jobs/{job_id}/query")
-def job_query(job_id: str, request: QueryRequest) -> dict[str, Any]:
-    """Run a query in the rule language over the job's anonymized profiles.
-
-    Returns matched / not matched / indeterminate candidates, each with the
-    plain-language reason. Identity is never returned here. The query passes
-    the same legal gate as a rule and is written to the audit trail.
-    """
-    _require_job(job_id)
-    judge = state.runner._judge_for(job_id, None, ensemble=False) if request.model_checks else None
-    try:
-        return run_query(state.store, job_id, request.dsl, judge=judge)
-    except DslError as exc:
-        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
-    except QueryRejected as exc:
-        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
+@app.get("/runs/{run_id}/audit")
+def run_audit(
+    run_id: str, include_batch: bool = True, candidate_id: str | None = None, limit: int = 2000
+) -> dict[str, Any]:
+    """This run's decision trail, by default merged with its batch's ingestion events."""
+    _require_run(run_id)
+    return {
+        "entries": state.store.audit_trail(
+            run_id=run_id, include_batch=include_batch, candidate_id=candidate_id, limit=limit
+        )
+    }
 
 
-@app.get("/jobs/{job_id}/audit")
-def job_audit(job_id: str, candidate_id: str | None = None, limit: int = 2000) -> dict[str, Any]:
-    """Full decision trail: rules applied, rules flagged, redactions, scores."""
-    _require_job(job_id)
-    return {"entries": state.store.audit_trail(job_id, candidate_id=candidate_id, limit=limit)}
+def _require_batch(batch_id: str) -> dict[str, Any]:
+    batch = state.store.get_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"unknown batch {batch_id!r}")
+    return batch
 
 
-def _require_job(job_id: str) -> dict[str, Any]:
-    job = state.store.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"unknown job {job_id!r}")
-    return job
+def _require_run(run_id: str) -> dict[str, Any]:
+    run = state.store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown run {run_id!r}")
+    return run

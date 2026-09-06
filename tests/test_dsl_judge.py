@@ -166,7 +166,7 @@ def test_ask_composes_with_structured_clauses(llm):
     assert "on-call" in verdict.reason and "6 years" in verdict.reason
 
 
-def test_model_checks_are_audited_in_a_job(tmp_path, monkeypatch, samples):
+def test_model_checks_are_audited_in_a_run(tmp_path, monkeypatch, samples):
     from rescan.config import settings
     from rescan.extract import Extractor
     from rescan.llm.client import build_client
@@ -179,14 +179,16 @@ def test_model_checks_are_audited_in_a_job(tmp_path, monkeypatch, samples):
     store = Store(tmp_path / "j.db")
     runner = PipelineRunner(store, build_client("stub"), Extractor())
     files = [(p.name, p.read_bytes()) for p in sorted(samples.glob("*.txt"))[:4]]
-    job_id = runner.create_job(RoleSpec(title="Engineer"), files)
-    runner.run_job(job_id, [], plan="Should have led a team.")
+    batch_id = runner.create_batch(files)
+    runner.process_batch(batch_id)
+    run_id = runner.create_run(batch_id, RoleSpec(title="Engineer"))
+    runner.execute_run(run_id, [], plan="Should have led a team.")
 
-    checks = [e for e in store.audit_trail(job_id) if e["event"] == "model_check"]
+    checks = [e for e in store.audit_trail(run_id=run_id) if e["event"] == "model_check"]
     assert checks, "every ASK evaluation is written to the audit trail"
     detail = checks[0]["detail"]
     assert detail["question"] == "Has the candidate led a team?"
     assert detail["answer"] in {"yes", "unknown"}
     assert len(detail["votes"]) == 3, "REQUIRE clauses put the question to the ensemble"
-    assert checks[0]["candidate_id"]
+    assert checks[0]["candidate_id"] and checks[0]["run_id"] == run_id
     store.close()

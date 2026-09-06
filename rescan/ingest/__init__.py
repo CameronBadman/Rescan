@@ -1,6 +1,6 @@
 """Document intake: uploads, archives, and the S3-compatible bucket."""
 
-from rescan.ingest.bucket import BucketPull, job_prefix, pull_job_documents
+from rescan.ingest.bucket import BucketPull, batch_prefix, pull_batch_documents
 from rescan.ingest.objectstore import (
     LocalObjectStore,
     ObjectRef,
@@ -23,6 +23,6 @@ __all__ = [
     "build_object_store",
     "expand_uploads",
     "is_usable",
-    "job_prefix",
-    "pull_job_documents",
+    "batch_prefix",
+    "pull_batch_documents",
 ]

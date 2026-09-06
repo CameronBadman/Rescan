@@ -15,8 +15,8 @@ from rescan.ingest import (
     ObjectStoreError,
     S3ObjectStore,
     build_object_store,
-    job_prefix,
-    pull_job_documents,
+    batch_prefix,
+    pull_batch_documents,
 )
 
 ROLE = {"title": "Senior Backend Engineer", "required_skills": ["Python"], "min_years_experience": 3}
@@ -37,13 +37,13 @@ def seed_local(root, job_id, samples):
 # --------------------------------------------------------------------------
 
 
-def test_job_prefix_layout():
-    assert job_prefix("abc") == "jobs/abc/"
-    assert job_prefix("/abc/", prefix="/tenants/x/") == "tenants/x/abc/"
-    assert job_prefix("abc", prefix="") == "abc/"
+def test_batch_prefix_layout():
+    assert batch_prefix("abc") == "jobs/abc/"
+    assert batch_prefix("/abc/", prefix="/tenants/x/") == "tenants/x/abc/"
+    assert batch_prefix("abc", prefix="") == "abc/"
 
 
-def test_local_store_lists_only_the_job_prefix(tmp_path, samples):
+def test_local_store_lists_only_the_batch_prefix(tmp_path, samples):
     store = seed_local(tmp_path, "round-1", samples)
     keys = [ref.key for ref in store.list_objects("jobs/round-1/")]
     assert all(key.startswith("jobs/round-1/") for key in keys)
@@ -65,7 +65,7 @@ def test_pull_skips_non_documents_and_expands_archives(tmp_path, samples):
         archive.writestr("__MACOSX/._x", b"junk")
     store.put_object("jobs/round-2/batch.zip", buffer.getvalue())
 
-    pull = pull_job_documents(store, "round-2")
+    pull = pull_batch_documents(store, "round-2")
     names = {name for name, _ in pull.documents}
     assert "001_priya_nair.txt" in names and "extra.txt" in names
     assert "manifest.json" not in names and ".DS_Store" not in names
@@ -75,7 +75,7 @@ def test_pull_skips_non_documents_and_expands_archives(tmp_path, samples):
 
 def test_pull_enforces_the_size_limit(tmp_path, samples):
     store = seed_local(tmp_path, "round-3", samples)
-    pull = pull_job_documents(store, "round-3", max_bytes=1500)
+    pull = pull_batch_documents(store, "round-3", max_bytes=1500)
     assert pull.documents, "at least the first document fits"
     assert any("size limit" in s["reason"] for s in pull.skipped)
 
@@ -93,7 +93,7 @@ def test_s3_store_against_the_s3_api(samples):
     assert len(refs) == 4 and all(ref.size > 0 for ref in refs)
     assert b"PRIYA" in store.get_object("jobs/s3-job/001_priya_nair.txt")
 
-    pull = pull_job_documents(store, "s3-job")
+    pull = pull_batch_documents(store, "s3-job")
     assert len(pull.documents) == 3
     assert pull.skipped == [{"key": "jobs/s3-job/notes.exe", "reason": "not a supported document type"}]
 
@@ -140,36 +140,39 @@ def client(tmp_path, monkeypatch):
         yield test_client
 
 
-def wait_for(client, job_id, timeout=30.0):
+def wait_for(client, path, timeout=30.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status = client.get(f"/jobs/{job_id}/status").json()
-        if status["status"] in {"complete", "failed"}:
-            return status
+        body = client.get(path).json()
+        if body["status"] in {"complete", "failed"}:
+            return body
         time.sleep(0.05)
-    raise AssertionError("job did not finish")
+    raise AssertionError(f"{path} did not finish")
 
 
-def test_job_from_bucket_runs_end_to_end(client, tmp_path, samples):
+def test_batch_from_bucket_ingests_end_to_end(client, tmp_path, samples):
     seed_local(tmp_path / "bucket", "round-7", samples)
-    response = client.post(
-        "/jobs/from-bucket",
-        json={"job_id": "round-7", "role": ROLE, "plan": "Must have 3+ years experience. Nice to have: Kubernetes."},
-    )
+    response = client.post("/batches/from-bucket", json={"batch_id": "round-7", "name": "Round 7"})
     assert response.status_code == 202, response.text
     body = response.json()
-    assert body["job_id"] == "round-7", "the bucket's job id is the Rescan job id"
+    assert body["batch_id"] == "round-7", "the bucket's folder is the batch id"
     assert body["accepted_documents"] == 10
     assert {s["key"] for s in body["skipped"]} == {"jobs/round-7/manifest.json", "jobs/round-7/.DS_Store"}
 
-    status = wait_for(client, "round-7")
-    assert status["status"] == "complete" and status["total"] == 10
-    events = [e for e in client.get("/jobs/round-7/audit").json()["entries"] if e["event"] == "bucket_pulled"]
+    batch = wait_for(client, "/batches/round-7")
+    assert batch["status"] == "complete" and batch["total"] == 10 and batch["ready"] == 10
+    events = [e for e in client.get("/batches/round-7/audit").json()["entries"] if e["event"] == "bucket_pulled"]
     assert events and events[0]["detail"]["documents"] == 10 and len(events[0]["detail"]["keys"]) == 10
-    assert client.get("/jobs/round-7/shortlist").json()["entries"]
+
+    run_id = client.post(
+        "/runs",
+        json={"batch_id": "round-7", "role": ROLE, "plan": "Must have 3+ years experience. Nice to have: Kubernetes."},
+    ).json()["run_id"]
+    assert wait_for(client, f"/runs/{run_id}")["status"] == "complete"
+    assert client.get(f"/runs/{run_id}/shortlist").json()["entries"]
 
 
-def test_job_from_bucket_with_injected_store(client, samples):
+def test_batch_from_bucket_with_injected_store(client, samples):
     class Memory:
         name = "memory"
 
@@ -187,24 +190,24 @@ def test_job_from_bucket_with_injected_store(client, samples):
             return self.objects[key]
 
     state.object_store = Memory()
-    response = client.post("/jobs/from-bucket", json={"job_id": "mem", "role": ROLE})
+    response = client.post("/batches/from-bucket", json={"batch_id": "mem"})
     assert response.status_code == 202 and response.json()["accepted_documents"] == 2
-    assert wait_for(client, "mem")["status"] == "complete"
+    assert wait_for(client, "/batches/mem")["status"] == "complete"
 
 
-def test_job_from_bucket_rejects_bad_ids_and_empty_prefixes(client):
-    assert client.post("/jobs/from-bucket", json={"job_id": "a/b", "role": ROLE}).status_code == 400
-    assert client.post("/jobs/from-bucket", json={"job_id": "..", "role": ROLE}).status_code == 400
-    response = client.post("/jobs/from-bucket", json={"job_id": "empty", "role": ROLE})
+def test_batch_from_bucket_rejects_bad_ids_and_empty_prefixes(client):
+    assert client.post("/batches/from-bucket", json={"batch_id": "a/b"}).status_code == 400
+    assert client.post("/batches/from-bucket", json={"batch_id": ".."}).status_code == 400
+    response = client.post("/batches/from-bucket", json={"batch_id": "empty"})
     assert response.status_code == 404
     assert "no usable documents" in response.json()["detail"]["message"]
 
 
-def test_job_from_bucket_is_not_run_twice(client, tmp_path, samples):
+def test_batch_from_bucket_is_not_ingested_twice(client, tmp_path, samples):
     seed_local(tmp_path / "bucket", "dup", samples)
-    assert client.post("/jobs/from-bucket", json={"job_id": "dup", "role": ROLE}).status_code == 202
-    assert client.post("/jobs/from-bucket", json={"job_id": "dup", "role": ROLE}).status_code == 409
-    wait_for(client, "dup")
+    assert client.post("/batches/from-bucket", json={"batch_id": "dup"}).status_code == 202
+    assert client.post("/batches/from-bucket", json={"batch_id": "dup"}).status_code == 409
+    wait_for(client, "/batches/dup")
 
 
 def test_object_store_failure_is_a_502_not_a_crash(client):
@@ -218,5 +221,5 @@ def test_object_store_failure_is_a_502_not_a_crash(client):
             raise ObjectStoreError("connection refused")
 
     state.object_store = Broken()
-    response = client.post("/jobs/from-bucket", json={"job_id": "x", "role": ROLE})
+    response = client.post("/batches/from-bucket", json={"batch_id": "x"})
     assert response.status_code == 502
