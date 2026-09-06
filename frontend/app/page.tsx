@@ -1,13 +1,13 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowUpRight, BarChart3, Check, ChevronDown, CircleHelp, ClipboardCheck, FileCheck2, Filter, Info, Layers3, LockKeyhole, MoreHorizontal, Plus, Search, ShieldCheck, Sparkles, Upload, Users, WandSparkles, X } from 'lucide-react'
+import { ArrowUpRight, BarChart3, Check, ChevronDown, CircleHelp, ClipboardCheck, FileCheck2, Filter, Info, Layers3, LockKeyhole, MoreHorizontal, Plus, Search, ShieldCheck, Sparkles, Trash2, Upload, Users, WandSparkles, X } from 'lucide-react'
 import { api, ApiError, API_URL, settled } from '@/lib/api'
 import type { AuditEntry, Entry, Identity, JobDetail, JobStatus, JobSummary, Rule, RuleSet, Shortlist } from '@/lib/api'
 
-type View = 'Overview' | 'Candidates' | 'Rules & checks' | 'Audit trail'
+type View = 'Overview' | 'Candidates' | 'Rules & checks' | 'Batches' | 'Audit trail'
 
-const navItems: [View, typeof BarChart3][] = [['Overview', BarChart3], ['Candidates', Users], ['Rules & checks', ShieldCheck], ['Audit trail', FileCheck2]]
+const navItems: [View, typeof BarChart3][] = [['Overview', BarChart3], ['Candidates', Users], ['Rules & checks', ShieldCheck], ['Batches', Layers3], ['Audit trail', FileCheck2]]
 
 // One row of the candidate table, built from the shortlist's four sections.
 type Row = {
@@ -80,6 +80,8 @@ export default function Page() {
   const [showRound, setShowRound] = useState(false)
   const [showJobs, setShowJobs] = useState(false)
   const [query, setQuery] = useState('')
+  const [version, setVersion] = useState(0)
+  const reload = () => setVersion((v) => v + 1)
 
   const refreshJobs = useCallback(async () => {
     try {
@@ -121,7 +123,7 @@ export default function Page() {
     }
     tick()
     return () => { cancelled = true }
-  }, [jobId])
+  }, [jobId, version])
 
   const rows = useMemo(() => rowsFor(shortlist), [shortlist])
   const filteredRows = rows.filter((r) => `${r.ref} ${r.status} ${r.evidence}`.toLowerCase().includes(query.toLowerCase()))
@@ -153,9 +155,10 @@ export default function Page() {
       </div></header>
       <div className="mx-auto max-w-[1220px] space-y-7 px-6 py-8 md:px-10">
         {error && <div className="rounded-lg border border-[#e6c3b8] bg-[#fdf1ec] p-3 text-xs text-[#8a4a3d]">{error}</div>}
-        {activeNav === 'Overview' && <Overview go={go} status={status} shortlist={shortlist} rules={rules} audit={audit} running={running} roleTitle={roleTitle} jobId={jobId} onNew={() => setShowRound(true)} />}
+        {activeNav === 'Overview' && <Overview go={go} status={status} shortlist={shortlist} rules={rules} audit={audit} running={running} roleTitle={roleTitle} jobId={jobId} onNew={() => setShowRound(true)} onRuleAdded={reload} />}
         {activeNav === 'Candidates' && <CandidatesView rows={filteredRows} total={status?.total ?? 0} query={query} setQuery={setQuery} identities={identities} onReview={review} onNew={() => setShowRound(true)} />}
-        {activeNav === 'Rules & checks' && <RulesView rules={rules} roleTitle={roleTitle} />}
+        {activeNav === 'Rules & checks' && <RulesView rules={rules} roleTitle={roleTitle} jobId={jobId} onChanged={reload} />}
+        {activeNav === 'Batches' && <BatchesView jobs={jobs} selected={jobId} onSelect={setJobId} rules={rules} status={status} onChanged={reload} roleTitle={roleTitle} onNew={() => setShowRound(true)} />}
         {activeNav === 'Audit trail' && <AuditView audit={audit} rules={rules} status={status} reviewed={Object.keys(identities).length} roleTitle={roleTitle} jobId={jobId} />}
       </div>
     </section>
@@ -167,7 +170,7 @@ function Brand() { return <div className="flex items-center gap-2 px-2"><div cla
 function PageHead({ eyebrow, title, body, action }: { eyebrow: string; title: React.ReactNode; body: string; action?: React.ReactNode }) { return <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-[#6c8175]"><span className="h-2 w-2 rounded-full bg-[#5d9b72]" /> {eyebrow}</p><h2 className="mt-2 text-3xl font-semibold tracking-tight">{title}</h2><p className="mt-2 max-w-2xl text-sm leading-6 text-[#819088]">{body}</p></div>{action}</div> }
 function NewRoundButton({ onClick }: { onClick: () => void }) { return <button onClick={onClick} className="flex w-fit items-center gap-2 rounded-lg bg-[#19312b] px-4 py-2.5 text-sm font-semibold text-white"><Plus size={17} /> New hiring round</button> }
 
-function Overview({ go, status, shortlist, rules, audit, running, roleTitle, jobId, onNew }: { go: (v: View) => void; status: JobStatus | null; shortlist: Shortlist | null; rules: RuleSet | null; audit: AuditEntry[]; running: boolean; roleTitle: string; jobId: string | null; onNew: () => void }) {
+function Overview({ go, status, shortlist, rules, audit, running, roleTitle, jobId, onNew, onRuleAdded }: { go: (v: View) => void; status: JobStatus | null; shortlist: Shortlist | null; rules: RuleSet | null; audit: AuditEntry[]; running: boolean; roleTitle: string; jobId: string | null; onNew: () => void; onRuleAdded: () => void }) {
   const total = status?.total ?? 0
   const processed = status?.processed ?? 0
   const shortlisted = shortlist?.entries.length ?? 0
@@ -183,7 +186,7 @@ function Overview({ go, status, shortlist, rules, audit, running, roleTitle, job
     <div className="grid gap-6 xl:grid-cols-[1.4fr_1fr]">
       <section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><div className="flex justify-between"><div><h3 className="font-semibold">Candidate pipeline</h3><p className="mt-1 text-xs text-[#819088]">Anonymized profiles ranked against the plan&apos;s criteria.</p></div><button onClick={() => go('Candidates')} className="text-xs font-bold text-[#507663]">View all</button></div>
         <div className="mt-4 divide-y divide-[#edf1ed]">{(shortlist?.entries ?? []).slice(0, 4).map((c, i) => <div key={c.candidate_ref} className="flex items-center gap-3 py-4"><div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#e7ece8] text-xs font-bold text-[#779083]">{String(i + 1).padStart(2, '0')}</div><div className="min-w-0 flex-1"><p className="text-sm font-semibold">{c.candidate_ref}</p><p className="mt-1 truncate text-xs text-[#8a9890]">{c.criteria.filter((x) => x.score > 0).map((x) => x.criterion.replace(/_/g, ' ')).join(' · ') || c.rationale}</p></div><div className="text-right"><p className="text-lg font-semibold">{Math.round(c.score * 100)}</p><p className="text-[10px] text-[#8a9890]">match score</p></div></div>)}{!shortlist && <p className="py-6 text-xs text-[#8a9890]">{running ? 'Ranking will appear when the round completes.' : 'No shortlist yet.'}</p>}</div></section>
-      <RuleCard roleTitle={roleTitle} />
+      <RuleCard roleTitle={roleTitle} jobId={jobId} onAdded={onRuleAdded} />
     </div>
     <section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><div className="flex items-center justify-between"><div><h3 className="font-semibold">Latest activity</h3><p className="mt-1 text-xs text-[#819088]">A traceable record of decisions.</p></div><button onClick={() => go('Audit trail')} className="text-xs font-bold text-[#507663]">View audit trail</button></div><Activity audit={audit} /></section></>
 }
@@ -195,30 +198,83 @@ function CandidatesView({ rows, total, query, setQuery, identities, onReview, on
         <tbody>{rows.map((r, i) => { const identity = identities[r.ref]; return <tr key={r.ref} className="border-b border-[#edf1ed] last:border-0"><td className="py-4"><div className="flex items-center gap-3"><div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#e7ece8] text-xs font-bold text-[#779083]">{String(i + 1).padStart(2, '0')}</div><div><p className="text-sm font-semibold">{identity?.full_name ?? r.ref}</p><p className="text-xs text-[#8a9890]">{identity ? r.ref : 'anonymized'}</p></div></div></td><td className="py-4">{r.score !== null && <span className="text-lg font-semibold">{Math.round(r.score * 100)}</span>}<span className={`ml-2 rounded-full px-2 py-1 text-[10px] font-semibold ${toneClass[r.tone]}`}>{r.status}</span></td><td className="max-w-md py-4 text-xs text-[#718078]">{r.evidence}</td><td className="py-4 text-xs text-[#718078]">{identity !== undefined ? 'In review' : 'Not reviewed'}</td><td className="py-4"><button onClick={() => onReview(r.ref)} className="rounded-md border border-[#dfe7e1] px-3 py-2 text-xs font-semibold">{identity !== undefined ? 'Reviewing' : 'Review'}</button></td></tr> })}{rows.length === 0 && <tr><td colSpan={5} className="py-8 text-center text-xs text-[#8a9890]">No candidates to show yet.</td></tr>}</tbody></table></div></div></>
 }
 
-// The rule checker: plain language in, the legal finding and the compiled clause out.
-function RuleCard({ roleTitle }: { roleTitle: string }) {
+// The rule checker: plain language in, the legal finding and the compiled
+// clause out — and, when the rule is lawful, onto the round with one click.
+// A high-risk rule cannot be added; the rewrite is offered instead.
+function RuleCard({ roleTitle, jobId, onAdded }: { roleTitle: string; jobId: string | null; onAdded: () => void }) {
   const [rule, setRule] = useState('3+ years of experience at a leading company')
   const [result, setResult] = useState<Rule | null>(null)
   const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
   const check = async () => {
-    setBusy(true)
+    setBusy(true); setNotice(null)
     try { const { rules } = await api.checkRules([rule], roleTitle === '—' ? undefined : roleTitle); setResult(rules[0] ?? null) } finally { setBusy(false) }
   }
-  return <section className="rounded-xl border border-[#dfe7e1] bg-[#19312b] p-6 text-[#f1f6f0]"><div className="flex items-center gap-2"><WandSparkles size={17} className="text-[#f3b078]" /><h3 className="font-semibold">Rule checker</h3></div><p className="mt-2 text-xs leading-5 text-[#b2c4b8]">Write a hiring rule in plain language. We&apos;ll flag risky proxies before they reach your shortlist.</p><textarea value={rule} onChange={(e) => { setRule(e.target.value); setResult(null) }} className="mt-5 min-h-[90px] w-full resize-none rounded-lg border border-[#476458] bg-[#27463b] p-3 text-sm leading-6 text-white outline-none" /><button onClick={check} disabled={busy} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-[#e7f1e7] py-2.5 text-xs font-bold text-[#19312b] disabled:opacity-60"><ShieldCheck size={15} /> {busy ? 'Checking…' : 'Check this rule'}</button>{result && <RuleResult rule={result} onClose={() => setResult(null)} />}</section>
+  const add = async () => {
+    if (!jobId) return
+    setBusy(true); setNotice(null)
+    try {
+      const added = await api.addRule(jobId, rule)
+      setNotice(`Added to ${jobId}${added.rule.dsl ? ` as ${added.rule.dsl}` : ' for the human reviewer'}. Re-screening every candidate…`)
+      setResult(null)
+      onAdded()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 422 && (e.detail as any)?.rule) setResult((e.detail as any).rule as Rule)
+      else setNotice(e instanceof Error ? e.message : String(e))
+    } finally { setBusy(false) }
+  }
+  const useRewrite = () => { const rewrite = result?.findings[0]?.suggested_rewrite; if (rewrite) { setRule(rewrite); setResult(null) } }
+  const canAdd = !!jobId && !!result && result.verdict !== 'risky'
+  return <section className="rounded-xl border border-[#dfe7e1] bg-[#19312b] p-6 text-[#f1f6f0]"><div className="flex items-center gap-2"><WandSparkles size={17} className="text-[#f3b078]" /><h3 className="font-semibold">Rule checker</h3></div><p className="mt-2 text-xs leading-5 text-[#b2c4b8]">Write a hiring rule in plain language. Lawful rules can be added to this round; risky proxies are flagged with a rewrite and never applied.</p><textarea value={rule} onChange={(e) => { setRule(e.target.value); setResult(null); setNotice(null) }} className="mt-5 min-h-[90px] w-full resize-none rounded-lg border border-[#476458] bg-[#27463b] p-3 text-sm leading-6 text-white outline-none" />
+    <div className="mt-3 flex gap-2"><button onClick={check} disabled={busy} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[#e7f1e7] py-2.5 text-xs font-bold text-[#19312b] disabled:opacity-60"><ShieldCheck size={15} /> {busy ? 'Working…' : 'Check this rule'}</button>{canAdd && <button onClick={add} disabled={busy} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[#f3b078] py-2.5 text-xs font-bold text-[#19312b] disabled:opacity-60"><Plus size={15} /> Add to this round</button>}</div>
+    {notice && <p className="mt-3 rounded-lg bg-[#27463b] p-3 text-[11px] leading-5 text-[#cfe3d6]">{notice}</p>}
+    {result && <RuleResult rule={result} onClose={() => setResult(null)} onUseRewrite={result.findings[0]?.suggested_rewrite ? useRewrite : undefined} />}</section>
 }
 
-function RuleResult({ rule, onClose }: { rule: Rule; onClose: () => void }) {
+function RuleResult({ rule, onClose, onUseRewrite }: { rule: Rule; onClose: () => void; onUseRewrite?: () => void }) {
   const finding = rule.findings[0]
-  if (finding) return <div className="mt-4 rounded-lg border border-[#a85f45] bg-[#603e35] p-3"><div className="flex items-start gap-2"><Info size={16} className="mt-0.5 shrink-0 text-[#f4bd8d]" /><div><p className="text-xs font-bold text-[#ffe0bd]">{rule.risk === 'high' ? 'Protected attribute or proxy — not applied' : 'Potential proxy detected — needs a job-based justification'}</p><p className="mt-1 text-[11px] leading-5 text-[#f0cbb4]">{finding.explanation}</p><p className="mt-2 text-[11px] leading-5 text-[#f0cbb4]"><span className="font-bold">Try:</span> {finding.suggested_rewrite}</p><p className="mt-2 text-[10px] text-[#d9a58f]">{finding.statutes[0]}</p>{rule.dsl && <p className="mt-2 font-mono text-[10px] text-[#f4d9c8]">still applied: {rule.dsl}</p>}</div><button onClick={onClose} className="ml-auto text-[#efc7b3]"><X size={14} /></button></div></div>
+  if (finding) return <div className="mt-4 rounded-lg border border-[#a85f45] bg-[#603e35] p-3"><div className="flex items-start gap-2"><Info size={16} className="mt-0.5 shrink-0 text-[#f4bd8d]" /><div className="min-w-0 flex-1"><p className="text-xs font-bold text-[#ffe0bd]">{rule.risk === 'high' ? 'Protected attribute or proxy — cannot be added' : 'Potential proxy — added only with a job-based justification'}</p><p className="mt-1 text-[11px] leading-5 text-[#f0cbb4]">{finding.explanation}</p><p className="mt-2 text-[11px] leading-5 text-[#f0cbb4]"><span className="font-bold">Recommended instead:</span> {finding.suggested_rewrite}</p><p className="mt-2 text-[10px] text-[#d9a58f]">{finding.statutes[0]}</p>{rule.dsl && <p className="mt-2 font-mono text-[10px] text-[#f4d9c8]">measurable part: {rule.dsl}</p>}{onUseRewrite && <button onClick={onUseRewrite} className="mt-3 rounded-md bg-[#f4bd8d] px-3 py-1.5 text-[11px] font-bold text-[#3b2620]">Use the rewrite</button>}</div><button onClick={onClose} className="ml-auto text-[#efc7b3]"><X size={14} /></button></div></div>
   if (rule.dsl) return <div className="mt-4 rounded-lg border border-[#4d7b62] bg-[#25473a] p-3"><div className="flex items-start gap-2"><Check size={16} className="mt-0.5 shrink-0 text-[#a8e0bd]" /><div><p className="text-xs font-bold text-[#d8f2e2]">Validated — tests a capability</p><p className="mt-1 font-mono text-[11px] leading-5 text-[#bfe3cd]">{rule.dsl}</p></div><button onClick={onClose} className="ml-auto text-[#bfe3cd]"><X size={14} /></button></div></div>
   return <div className="mt-4 rounded-lg border border-[#6d7f76] bg-[#2b3f37] p-3"><div className="flex items-start gap-2"><Info size={16} className="mt-0.5 shrink-0 text-[#cfe0d6]" /><div><p className="text-xs font-bold text-[#e4efe8]">Lawful, but a human has to judge it</p><p className="mt-1 text-[11px] leading-5 text-[#c5d6cc]">{rule.notes[0]}</p></div><button onClick={onClose} className="ml-auto text-[#cfe0d6]"><X size={14} /></button></div></div>
 }
 
-function RulesView({ rules, roleTitle }: { rules: RuleSet | null; roleTitle: string }) {
+function RulesView({ rules, roleTitle, jobId, onChanged }: { rules: RuleSet | null; roleTitle: string; jobId: string | null; onChanged: () => void }) {
   const verdictLabel = (r: Rule): [string, string] => r.verdict === 'applicable' ? (r.risk === 'review' ? ['Applied · justify', 'bg-[#fff1df] text-[#bd783d]'] : ['Validated', 'bg-[#e8f1e9] text-[#47765f]']) : r.verdict === 'risky' ? ['Needs rewrite', 'bg-[#fbe5e1] text-[#a4453a]'] : ['Human review', 'bg-[#eef1ef] text-[#6f7e76]']
   const list = rules?.rules ?? []
-  return <><PageHead eyebrow="Governance workspace" title="Rules & checks" body="Validate every criterion before it can influence a shortlist." /><div className="grid gap-6 xl:grid-cols-[1.1fr_.9fr]"><RuleCard roleTitle={roleTitle} /><section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><h3 className="font-semibold">Active hiring rules</h3><p className="mt-1 text-xs text-[#819088]">{list.length ? `${rules?.applied ?? 0} rules are shaping this round; ${rules?.flagged ?? 0} were flagged.` : 'No compiled rules for this round yet.'}</p><div className="mt-5 space-y-3">{list.map((r) => { const [label, cls] = verdictLabel(r); return <div key={r.id} className="rounded-lg border border-[#edf1ed] p-4"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold">{r.source_text}</p><span className={`whitespace-nowrap rounded-full px-2 py-1 text-[10px] font-bold ${cls}`}>{label}</span></div>{r.dsl && <p className="mt-2 font-mono text-[11px] leading-5 text-[#507663]">{r.dsl}</p>}{r.findings[0] && <p className="mt-2 text-xs leading-5 text-[#86938b]">{r.findings[0].statutes[0]} — try: {r.findings[0].suggested_rewrite}</p>}{!r.dsl && !r.findings[0] && <p className="mt-2 text-xs leading-5 text-[#86938b]">{r.notes[0]}</p>}</div> })}</div></section></div>
+  return <><PageHead eyebrow="Governance workspace" title="Rules & checks" body="Validate every criterion before it can influence a shortlist." /><div className="grid gap-6 xl:grid-cols-[1.1fr_.9fr]"><RuleCard roleTitle={roleTitle} jobId={jobId} onAdded={onChanged} /><section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><h3 className="font-semibold">Active hiring rules</h3><p className="mt-1 text-xs text-[#819088]">{list.length ? `${rules?.applied ?? 0} rules are shaping this round; ${rules?.flagged ?? 0} were flagged.` : 'No compiled rules for this round yet.'}</p><div className="mt-5 space-y-3">{list.map((r) => { const [label, cls] = verdictLabel(r); return <div key={r.id} className="rounded-lg border border-[#edf1ed] p-4"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold">{r.source_text}</p><div className="flex shrink-0 items-center gap-2"><span className={`whitespace-nowrap rounded-full px-2 py-1 text-[10px] font-bold ${cls}`}>{label}</span>{jobId && <button title="Remove this rule and re-screen" onClick={async () => { await api.removeRule(jobId, r.id); onChanged() }} className="rounded-md border border-[#dfe7e1] p-1 text-[#8a9890] hover:text-[#a4453a]"><Trash2 size={13} /></button>}</div></div>{r.dsl && <p className="mt-2 font-mono text-[11px] leading-5 text-[#507663]">{r.dsl}</p>}{r.findings[0] && <p className="mt-2 text-xs leading-5 text-[#86938b]">{r.findings[0].statutes[0]} — try: {r.findings[0].suggested_rewrite}</p>}{!r.dsl && !r.findings[0] && <p className="mt-2 text-xs leading-5 text-[#86938b]">{r.notes[0]}</p>}</div> })}</div></section></div>
     {rules?.reasoning && <section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><h3 className="font-semibold">How the plan was read</h3><p className="mt-1 text-xs text-[#819088]">The model&apos;s reasoning over the plan, kept for the record.</p><p className="mt-4 whitespace-pre-wrap text-xs leading-6 text-[#5d6e66]">{rules.reasoning}</p></section>}</>
+}
+
+// Every round with its filters: add more or fewer, each addition checked
+// under the law first, and the round re-screened without re-extraction.
+function BatchesView({ jobs, selected, onSelect, rules, status, onChanged, roleTitle, onNew }: { jobs: JobSummary[]; selected: string | null; onSelect: (id: string) => void; rules: RuleSet | null; status: JobStatus | null; onChanged: () => void; roleTitle: string; onNew: () => void }) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState<{ tone: 'good' | 'warn' | 'bad'; title: string; body: string; rewrite?: string } | null>(null)
+  const running = status ? !settled(status.status) : false
+  const add = async () => {
+    if (!selected || !text.trim()) return
+    setBusy(true); setOutcome(null)
+    try {
+      const added = await api.addRule(selected, text.trim())
+      const r = added.rule
+      setOutcome(r.dsl ? { tone: r.risk === 'review' ? 'warn' : 'good', title: r.risk === 'review' ? 'Added — record the job-based justification' : 'Added and applied', body: r.dsl } : { tone: 'warn', title: 'Added for the human reviewer', body: r.notes[0] ?? 'No structured field tests this rule.' })
+      setText(''); onChanged()
+    } catch (e) {
+      const rule = e instanceof ApiError && e.status === 422 ? (e.detail as any)?.rule as Rule | undefined : undefined
+      const f = rule?.findings[0]
+      setOutcome(f ? { tone: 'bad', title: 'Not added — screens on a protected attribute or a proxy', body: `${f.explanation} (${f.statutes[0] ?? ''})`, rewrite: f.suggested_rewrite } : { tone: 'bad', title: 'Could not add the rule', body: e instanceof Error ? e.message : String(e) })
+    } finally { setBusy(false) }
+  }
+  const remove = async (ruleId: string) => { if (!selected) return; setBusy(true); try { await api.removeRule(selected, ruleId); setOutcome({ tone: 'warn', title: 'Removed', body: 'Re-screening every candidate without it…' }); onChanged() } finally { setBusy(false) } }
+  const verdictLabel = (r: Rule): [string, string] => r.verdict === 'applicable' ? (r.kind === 'prefer' ? ['Preference', 'bg-[#e8f1e9] text-[#47765f]'] : r.risk === 'review' ? ['Filter · justify', 'bg-[#fff1df] text-[#bd783d]'] : ['Filter', 'bg-[#e8f1e9] text-[#47765f]']) : r.verdict === 'risky' ? ['Flagged · not applied', 'bg-[#fbe5e1] text-[#a4453a]'] : ['Human review', 'bg-[#eef1ef] text-[#6f7e76]']
+  return <><PageHead eyebrow="Batches" title="Hiring rounds & filters" body="Every round, the filters shaping it, and the controls to apply more or fewer. Each addition is checked under anti-discrimination law before it touches a candidate." action={<NewRoundButton onClick={onNew} />} />
+    <div className="grid gap-6 xl:grid-cols-[.8fr_1.2fr]">
+      <section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><h3 className="font-semibold">Rounds</h3><p className="mt-1 text-xs text-[#819088]">{jobs.length} rounds</p><div className="mt-4 divide-y divide-[#edf1ed]">{jobs.map((j) => <button key={j.id} onClick={() => onSelect(j.id)} className={`flex w-full items-center justify-between py-3 text-left ${j.id === selected ? 'font-semibold' : ''}`}><span className="text-sm">{j.id}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${j.status === 'complete' ? 'bg-[#e8f1e9] text-[#47765f]' : j.status === 'failed' ? 'bg-[#fbe5e1] text-[#a4453a]' : 'bg-[#fff1df] text-[#bd783d]'}`}>{j.status}</span></button>)}{jobs.length === 0 && <p className="py-4 text-xs text-[#8a9890]">No rounds yet.</p>}</div></section>
+      <section className="rounded-xl border border-[#dfe7e1] bg-white p-6"><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold">{selected ? `${roleTitle} / ${selected}` : 'Select a round'}</h3><p className="mt-1 text-xs text-[#819088]">{running ? `Re-screening… ${status?.processed ?? 0} of ${status?.total ?? 0}` : rules ? `${rules.applied} applied, ${rules.flagged} flagged, ${rules.rules.length} in total` : 'No rules yet.'}</p></div></div>
+        <div className="mt-5 space-y-2">{(rules?.rules ?? []).map((r) => { const [label, cls] = verdictLabel(r); return <div key={r.id} className="flex items-start gap-3 rounded-lg border border-[#edf1ed] p-3"><div className="min-w-0 flex-1"><p className="text-sm">{r.source_text}</p>{r.dsl && <p className="mt-1 font-mono text-[11px] text-[#507663]">{r.dsl}</p>}{r.verdict === 'risky' && r.findings[0] && <p className="mt-1 text-[11px] text-[#a4453a]">{r.findings[0].statutes[0]} — try: {r.findings[0].suggested_rewrite}</p>}</div><span className={`whitespace-nowrap rounded-full px-2 py-1 text-[10px] font-bold ${cls}`}>{label}</span>{selected && <button disabled={busy || running} title="Remove and re-screen" onClick={() => remove(r.id)} className="rounded-md border border-[#dfe7e1] p-1 text-[#8a9890] hover:text-[#a4453a] disabled:opacity-40"><Trash2 size={13} /></button>}</div> })}</div>
+        <div className="mt-5 rounded-lg bg-[#f5f8f5] p-4"><p className="text-xs font-semibold">Add a filter</p><p className="mt-1 text-[11px] text-[#819088]">Plain language. Lawful rules are compiled and applied; a rule that screens on a protected attribute is refused and a rewrite recommended.</p><div className="mt-3 flex gap-2"><input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') add() }} placeholder="e.g. At least 3 years with Python" className="flex-1 rounded-lg border border-[#dfe7e1] bg-white px-3 py-2 text-sm outline-none focus:border-[#76a383]" /><button onClick={add} disabled={busy || running || !selected || !text.trim()} className="rounded-lg bg-[#19312b] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">{busy ? 'Working…' : 'Add'}</button></div>
+          {outcome && <div className={`mt-3 rounded-lg p-3 text-xs ${outcome.tone === 'good' ? 'bg-[#e8f1e9] text-[#2f5a43]' : outcome.tone === 'warn' ? 'bg-[#fff1df] text-[#8a5a2b]' : 'bg-[#fbe5e1] text-[#7a3a30]'}`}><p className="font-bold">{outcome.title}</p><p className="mt-1 leading-5">{outcome.body}</p>{outcome.rewrite && <button onClick={() => { setText(outcome.rewrite!); setOutcome(null) }} className="mt-2 rounded-md bg-white/70 px-3 py-1.5 text-[11px] font-bold">Use the recommended rewrite: “{outcome.rewrite}”</button>}</div>}</div></section></div></>
 }
 
 function AuditView({ audit, rules, status, reviewed, roleTitle, jobId }: { audit: AuditEntry[]; rules: RuleSet | null; status: JobStatus | null; reviewed: number; roleTitle: string; jobId: string | null }) {

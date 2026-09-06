@@ -68,7 +68,10 @@ pod() {
   local key="$1" model="$2" gpu="$3" count="$4" vol_gb="$5"; shift 5
   local vol_id args env id
   vol_id="$(volume "rescan-$key-weights" "$vol_gb")" || exit 1
-  args="--model $model --served-model-name $model --host 0.0.0.0 --port 8000 --tensor-parallel-size $count --max-model-len $MAX_LEN --gpu-memory-utilization 0.92 --limit-mm-per-prompt image=0,video=0 $*"
+  # Model as the positional argument (vllm serve warns on --model). No
+  # --limit-mm-per-prompt: it needs JSON, which does not survive RunPod's
+  # docker-args string; the vision encoder costs ~1 GB and is simply unused.
+  args="$model --served-model-name $model --host 0.0.0.0 --port 8000 --tensor-parallel-size $count --max-model-len $MAX_LEN --gpu-memory-utilization 0.92 $*"
   env="$(python3 -c "import json; print(json.dumps({'HF_HOME': '/workspace/huggingface', 'HF_HUB_ENABLE_HF_TRANSFER': '1', 'VLLM_API_KEY': '$VLLM_API_KEY', 'VLLM_USE_V1': '1'}))")"
   echo "creating pod rescan-$key: $count x $gpu, $model" >&2
   id="$(runpodctl pod create --name "rescan-$key" --image "$IMAGE" --gpu-id "$gpu" --gpu-count "$count" \

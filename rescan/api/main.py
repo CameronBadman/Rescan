@@ -35,7 +35,7 @@ from rescan.ingest import (
 )
 from rescan.llm.client import build_client
 from rescan.pipeline.query import QueryRejected, run_query
-from rescan.pipeline.runner import PipelineRunner
+from rescan.pipeline.runner import PipelineRunner, RuleRejected
 from rescan.rules.classifier import classify_rule, compile_plan
 from rescan.schemas import RoleSpec
 from rescan.store import Store
@@ -158,6 +158,10 @@ class BucketJobRequest(BaseModel):
     plan: str | None = Field(default=None, description="The recruiter's hiring plan, free text.")
     rules: list[str] = Field(default_factory=list, description="Discrete rules, in addition to or instead of the plan.")
     prefix: str | None = Field(default=None, description="Override the configured bucket prefix for this job.")
+
+
+class RuleAddRequest(BaseModel):
+    text: str = Field(description="A screening rule in plain language.")
 
 
 class QueryRequest(BaseModel):
@@ -441,6 +445,57 @@ def job_status(job_id: str) -> JobStatusResponse:
 def job_rules(job_id: str) -> dict[str, Any]:
     job = _require_job(job_id)
     return job["rules"] or {"rules": []}
+
+
+@app.post("/jobs/{job_id}/rules", status_code=202)
+def add_job_rule(job_id: str, request: RuleAddRequest) -> dict[str, Any]:
+    """Add a rule to a finished round and re-screen it.
+
+    The rule is checked under the same legal review as the plan. If it is
+    high risk it is not added: the response is a 422 carrying the finding,
+    the statute and a measurable rewrite to use instead. Otherwise it is
+    compiled, added, and the round is re-screened and re-ranked in the
+    background from the stored anonymized profiles — nothing is re-extracted.
+    """
+    job = _require_job(job_id)
+    if job["status"] == "running":
+        raise HTTPException(status_code=409, detail=f"job {job_id!r} is still running")
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="empty rule")
+    try:
+        rule = state.runner.add_rule(job_id, request.text)
+    except RuleRejected as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "kind": "legal",
+                "message": "This rule screens on a protected attribute or a proxy for one and was not added.",
+                "rule": exc.rule.model_dump(mode="json"),
+            },
+        ) from exc
+    state.pool.submit(_rescreen_safely, job_id)
+    return {"rule": rule.model_dump(mode="json"), "added": True, "rescreening": True, "status_url": f"/jobs/{job_id}/status"}
+
+
+@app.delete("/jobs/{job_id}/rules/{rule_id}", status_code=202)
+def remove_job_rule(job_id: str, rule_id: str) -> dict[str, Any]:
+    """Remove a rule from a round and re-screen it."""
+    job = _require_job(job_id)
+    if job["status"] == "running":
+        raise HTTPException(status_code=409, detail=f"job {job_id!r} is still running")
+    try:
+        state.runner.remove_rule(job_id, rule_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    state.pool.submit(_rescreen_safely, job_id)
+    return {"removed": rule_id, "rescreening": True, "status_url": f"/jobs/{job_id}/status"}
+
+
+def _rescreen_safely(job_id: str) -> None:
+    try:
+        state.runner.rescreen(job_id)
+    except Exception:
+        log.exception("rescreen of %s failed", job_id)
 
 
 @app.get("/jobs/{job_id}/shortlist")

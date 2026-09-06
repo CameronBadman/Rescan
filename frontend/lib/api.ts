@@ -74,6 +74,10 @@ export const api = {
     request<RuleSet>('/rules/compile', { method: 'POST', body: JSON.stringify({ plan, role_context: roleContext ?? null }) }),
   query: (id: string, dsl: string, modelChecks = true) =>
     request<QueryResult>(`/jobs/${encodeURIComponent(id)}/query`, { method: 'POST', body: JSON.stringify({ dsl, model_checks: modelChecks }) }),
+  addRule: (id: string, text: string) =>
+    request<{ rule: Rule; added: boolean; rescreening: boolean }>(`/jobs/${encodeURIComponent(id)}/rules`, { method: 'POST', body: JSON.stringify({ text }) }),
+  removeRule: (id: string, ruleId: string) =>
+    request<{ removed: string; rescreening: boolean }>(`/jobs/${encodeURIComponent(id)}/rules/${encodeURIComponent(ruleId)}`, { method: 'DELETE' }),
   fromBucket: (jobId: string, role: { title: string; description?: string }, plan: string) =>
     request<{ job_id: string; accepted_documents: number }>('/jobs/from-bucket', {
       method: 'POST', body: JSON.stringify({ job_id: jobId, role, plan, rules: [] }),

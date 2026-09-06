@@ -343,6 +343,67 @@ def start_job_from_bucket(
 
 
 @server.tool(
+    name="add_rule_to_job",
+    title="Add a screening rule to a round",
+    description=(
+        "Check a plain-language rule under Australian anti-discrimination law and, if it "
+        "is not high risk, compile it, add it to the round and re-screen every candidate "
+        "from their stored anonymized profile. A high-risk rule is NOT added: the result "
+        "carries the finding, the statute and a measurable rewrite to propose instead."
+    ),
+)
+def add_rule_to_job(job_id: str, text: str) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        status, body = api.call("POST", f"/jobs/{job_id}/rules", json={"text": text})
+        if status == 422 and isinstance(body, dict) and isinstance(body.get("detail"), dict):
+            return {"ok": False, "added": False, "error": body["detail"]}
+        if status >= 400:
+            return RemoteError(status, body).to_dict()
+        return {"ok": True, **body}
+    from rescan.pipeline.runner import PipelineRunner, RuleRejected
+    from rescan.extract import Extractor
+
+    runner = PipelineRunner(_db(), _llm(), Extractor())
+    try:
+        rule = runner.add_rule(job_id, text)
+    except KeyError as exc:
+        return {"ok": False, "error": {"kind": "not_found", "message": str(exc)}}
+    except RuleRejected as exc:
+        return {"ok": False, "added": False, "error": {"kind": "legal", "rule": _rule_payload(exc.rule)}}
+    import threading
+
+    threading.Thread(target=lambda: runner.rescreen(job_id), daemon=True).start()
+    return {"ok": True, "rule": _rule_payload(rule), "added": True, "rescreening": True}
+
+
+@server.tool(
+    name="remove_rule_from_job",
+    title="Remove a screening rule from a round",
+    description="Remove a rule by id and re-screen every candidate without it.",
+)
+def remove_rule_from_job(job_id: str, rule_id: str) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        try:
+            return {"ok": True, **api.ok("DELETE", f"/jobs/{job_id}/rules/{rule_id}")}
+        except RemoteError as exc:
+            return exc.to_dict()
+    from rescan.pipeline.runner import PipelineRunner
+    from rescan.extract import Extractor
+
+    runner = PipelineRunner(_db(), _llm(), Extractor())
+    try:
+        runner.remove_rule(job_id, rule_id)
+    except KeyError as exc:
+        return {"ok": False, "error": {"kind": "not_found", "message": str(exc)}}
+    import threading
+
+    threading.Thread(target=lambda: runner.rescreen(job_id), daemon=True).start()
+    return {"ok": True, "removed": rule_id, "rescreening": True}
+
+
+@server.tool(
     name="job_status",
     title="Job progress",
     description="Per-status candidate counts for a job: pending, extracting, ..., complete, needs_manual_review, failed.",

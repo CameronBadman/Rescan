@@ -36,3 +36,15 @@ def _in_process_mcp(monkeypatch):
     monkeypatch.setattr(settings, "mcp_remote_key", "")
     monkeypatch.setattr(mcp_module, "_remote", None)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _stub_inference(monkeypatch):
+    """Tests never call a served model: a developer's .env may point
+    RESCAN_LLM_BACKEND at a GPU pod, and the suite must not follow it."""
+    from rescan.config import settings
+
+    monkeypatch.setattr(settings, "llm_backend", "stub")
+    monkeypatch.setattr(settings, "compile_base_url", "")
+    monkeypatch.setattr(settings, "compile_model", "")
+    yield

@@ -27,8 +27,10 @@ from rescan.pipeline.anonymize import AnonymizationError, anonymize_resume
 from rescan.pipeline.ensemble import ensemble_pass
 from rescan.pipeline.rank import borderline_refs, build_shortlist, criteria_for, triage_rank
 from rescan.pipeline.structure import StructuringError, structure_resume
-from rescan.rules.classifier import compile_plan
+from rescan.rules.classifier import classify_rule, compile_plan
 from rescan.rules.engine import ScreeningResult, screen
+from rescan.rules.models import ClassifiedRule, RuleSet
+from rescan.rules.statutes import RiskLevel
 from rescan.schemas import (
     AnonymizedProfile,
     CandidateStatus,
@@ -38,6 +40,14 @@ from rescan.schemas import (
 from rescan.store import Store
 
 log = logging.getLogger(__name__)
+
+
+class RuleRejected(ValueError):
+    """The rule screens on a protected attribute or a proxy; it was not added."""
+
+    def __init__(self, rule: ClassifiedRule) -> None:
+        super().__init__("rule rejected: it screens on a protected attribute or a proxy for one")
+        self.rule = rule
 
 
 class PipelineRunner:
@@ -282,6 +292,11 @@ class PipelineRunner:
         ])
 
         # --- screen ---
+        result = self._screen_profile(job_id, candidate_id, profile, rule_set)
+        return profile, result
+
+    def _screen_profile(self, job_id: str, candidate_id: str, profile: AnonymizedProfile, rule_set) -> ScreeningResult:
+        """Screen one anonymized profile and record every outcome."""
         self.store.update_candidate(candidate_id, status=CandidateStatus.SCREENING.value)
         result = screen(profile, rule_set, self._judge_for(job_id, candidate_id))
         self.store.update_candidate(candidate_id, screening_json=json.dumps(result.to_dict(), default=str))
@@ -299,8 +314,103 @@ class PipelineRunner:
             self.store.update_candidate(candidate_id, status=CandidateStatus.NEEDS_MANUAL_REVIEW.value)
         else:
             self.store.update_candidate(candidate_id, status=CandidateStatus.COMPLETE.value)
+        return result
 
-        return profile, result
+    # ------------------------------------------------------------------
+    # Changing the rules of a finished job
+    # ------------------------------------------------------------------
+
+    def rule_set_for(self, job_id: str) -> RuleSet:
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise KeyError(f"unknown job {job_id!r}")
+        return RuleSet.model_validate(job["rules"]) if job["rules"] else RuleSet()
+
+    def add_rule(self, job_id: str, text: str) -> ClassifiedRule:
+        """Check a rule against the law and, if it is not high risk, add it to the job.
+
+        A high-risk rule is never added: the ClassifiedRule with its findings
+        and rewrite is raised inside RuleRejected so the caller can show the
+        recommendation. The caller decides when to rescreen.
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise KeyError(f"unknown job {job_id!r}")
+        role = RoleSpec.model_validate(job["role"])
+        rule_set = self.rule_set_for(job_id)
+        taken = {rule.id for rule in rule_set.rules}
+        index = len(rule_set.rules) + 1
+        while f"rule_{index}" in taken:
+            index += 1
+        rule = classify_rule(text, self.client, role_context=role.title, rule_id=f"rule_{index}")
+        if rule.risk is RiskLevel.HIGH:
+            self.store.audit(
+                job_id, "rules", "rule_rejected",
+                detail={"text": rule.source_text, "risk": rule.risk.value,
+                        "findings": [f.model_dump(mode="json") for f in rule.findings]},
+            )
+            raise RuleRejected(rule)
+        rule_set.rules.append(rule)
+        self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
+        self.store.audit(
+            job_id, "rules", "rule_added",
+            detail={"rule_id": rule.id, "text": rule.source_text, "kind": rule.kind, "verdict": rule.verdict.value,
+                    "risk": rule.risk.value, "dsl": rule.dsl, "notes": rule.notes},
+        )
+        return rule
+
+    def remove_rule(self, job_id: str, rule_id: str) -> ClassifiedRule:
+        rule_set = self.rule_set_for(job_id)
+        rule = next((r for r in rule_set.rules if r.id == rule_id), None)
+        if rule is None:
+            raise KeyError(f"job {job_id!r} has no rule {rule_id!r}")
+        rule_set.rules = [r for r in rule_set.rules if r.id != rule_id]
+        self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
+        self.store.audit(job_id, "rules", "rule_removed", detail={"rule_id": rule_id, "text": rule.source_text})
+        return rule
+
+    def rescreen(self, job_id: str) -> dict[str, Any]:
+        """Re-run screening and ranking over the job's stored anonymized profiles.
+
+        Extraction, structuring and anonymization are not repeated; the rule
+        set as currently stored is applied to every candidate that has an
+        anonymized profile, and the shortlist is rebuilt.
+        """
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise KeyError(f"unknown job {job_id!r}")
+        role = RoleSpec.model_validate(job["role"])
+        rule_set = self.rule_set_for(job_id)
+        self.store.update_job(job_id, status=JobStatus.RUNNING.value)
+        self.store.audit(job_id, "rules", "rescreen_started", detail={"applied": len(rule_set.applied)})
+
+        try:
+            stored = [
+                candidate for candidate in self.store.list_candidates(job_id)
+                if candidate.get("anonymized") and candidate.get("candidate_ref")
+            ]
+
+            def one(candidate):
+                profile = AnonymizedProfile.model_validate(candidate["anonymized"])
+                return profile, self._screen_profile(job_id, candidate["id"], profile, rule_set)
+
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                results = list(pool.map(one, stored))
+            profiles = [profile for profile, _ in results]
+            screening = {result.candidate_ref: result for _, result in results}
+            shortlist = self._rank(job_id, role, profiles, screening, rule_set)
+        except Exception as exc:
+            log.exception("rescreen of %s failed", job_id)
+            self.store.update_job(job_id, status=JobStatus.FAILED.value, error=str(exc))
+            self.store.audit(job_id, "job", "job_failed", detail={"error": str(exc)})
+            raise
+
+        self.store.update_job(job_id, status=JobStatus.COMPLETE.value, error=None)
+        self.store.audit(
+            job_id, "rules", "rescreen_complete",
+            detail={"candidates": len(profiles), "shortlisted": len(shortlist.entries), "excluded": len(shortlist.excluded)},
+        )
+        return shortlist.model_dump(mode="json")
 
     def _judge_for(self, job_id: str, candidate_id: str | None, *, ensemble: bool | None = None) -> Judge:
         """A judge for ASK clauses that writes every model check to the audit trail.
