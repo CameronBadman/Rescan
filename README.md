@@ -295,17 +295,26 @@ Terraform for the real bucket — private, encrypted, versioned, TLS-only,
 
 ## MCP server
 
-The rule engine is also an MCP server, so the wording check is available in any
-MCP-capable client before a phrase ever becomes a screening rule.
+The rule engine and a job's results are also an MCP server, so an agent can
+check wording, compile a plan, start a job from the bucket, query candidates
+and read the shortlist and audit trail from any MCP-capable client.
 
 ```bash
 python -m rescan.mcp_server           # stdio
 python -m rescan.mcp_server --http    # streamable HTTP
 ```
 
+Two modes. In-process (default) runs the pipeline against the local store.
+With `RESCAN_MCP_REMOTE_URL` and `RESCAN_MCP_REMOTE_KEY` set — `.env` is read —
+every tool calls the deployed HTTP API instead, so an agent on a laptop drives
+the real deployment with the same tool surface. `.mcp.json` registers the
+server for Claude Code in this repository.
+
 Tools: `compile_hiring_plan`, `check_screening_rule`, `check_screening_rules`,
-`describe_query_language`, `parse_query`, `query_candidates`,
-`list_known_risky_phrases`, `map_qualification_to_aqf`.
+`describe_query_language`, `parse_query`, `start_job_from_bucket`, `job_status`,
+`job_rules`, `job_shortlist` (anonymized unless `reattach_identity`),
+`job_audit`, `query_candidates`, `list_jobs`, `list_known_risky_phrases`,
+`map_qualification_to_aqf`.
 
 ## Bias audit
 
@@ -331,6 +340,15 @@ report says so rather than presenting a zero gap as a finding.
 
 `docker-compose.yml` runs the API alongside Tika and a MinIO bucket. Set
 `RESCAN_API_KEYS` and point `RESCAN_LLM_BASE_URL` at the inference host.
+
+**On AWS**, `infra/aws` also deploys the API: one small arm64 instance in
+Sydney that bootstraps from a source archive in a private artifacts bucket
+(Tika and uvicorn under systemd, S3 through the instance role, no keys on the
+box, no SSH — SSM instead), behind CloudFront for HTTPS on its own domain.
+`./scripts/deploy_aws.sh` archives HEAD, uploads it and refreshes the
+instance; `terraform output -raw mcp_env >> .env` points the MCP server at it.
+Inference is whatever `llm_settings` says — the stub until a GPU is up, then
+the RunPod pod URLs.
 
 Rule sets stored before the language existed carry a `predicate` key the
 current model ignores; they load with no clause and are not applied. Re-run the
@@ -367,6 +385,13 @@ Not yet verified:
   27B writes the rule language — and how often the repair round fires — is
   unmeasured. The bias audit has no real result yet. Run
   `python -m scripts.smoke_real_model` against the served 27B first.
+- **Deployed and verified live on AWS**: the API runs at a CloudFront URL in
+  front of the Sydney instance; with the API key it compiled the demo plan,
+  pulled the 12 demo documents from the real bucket through the instance
+  role and ran the job to completion, answered queries, and refused a
+  forbidden field with a 422; without the key everything is 401. The MCP
+  server in remote mode drove all fourteen tools against it through a real
+  MCP client.
 - **Bucket ingestion verified live**: `infra/aws` created the bucket and a
   read-only service user, and `POST /jobs/from-bucket` pulled 12 documents
   from `s3://rescan-resumes-…/jobs/demo/` in ap-southeast-2 with that user's
