@@ -108,3 +108,24 @@ def test_rule_ids_stay_unique_after_removals(client, finished):
 
 def test_unknown_job_and_empty_rule(client):
     assert client.post("/jobs/nope/rules", json={"text": "x"}).status_code == 404
+
+
+def test_a_new_round_can_reuse_a_tuned_rule_set(client, finished, samples, monkeypatch):
+    from rescan.ingest import LocalObjectStore
+
+    client.post(f"/jobs/{finished}/rules", json={"text": "At least 8 years of professional experience"})
+    wait_for(client, finished)
+    tuned = client.get(f"/jobs/{finished}/rules").json()
+
+    store = LocalObjectStore(settings.local_object_store_dir)
+    for path in sorted(samples.glob("*.txt"))[:3]:
+        store.put_object(f"jobs/next-batch/{path.name}", path.read_bytes())
+    response = client.post("/jobs/from-bucket", json={"job_id": "next-batch", "role": ROLE, "rules_from": finished})
+    assert response.status_code == 202, response.text
+    wait_for(client, "next-batch")
+
+    copied = client.get("/jobs/next-batch/rules").json()
+    assert [r["dsl"] for r in copied["rules"]] == [r["dsl"] for r in tuned["rules"]]
+    events = [e["event"] for e in client.get("/jobs/next-batch/audit").json()["entries"]]
+    assert "rules_copied" in events and "plan_compiled" not in events
+    assert client.post("/jobs/from-bucket", json={"job_id": "x", "role": ROLE, "rules_from": "nope"}).status_code == 404

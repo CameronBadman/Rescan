@@ -78,16 +78,17 @@ export const api = {
     request<{ rule: Rule; added: boolean; rescreening: boolean }>(`/jobs/${encodeURIComponent(id)}/rules`, { method: 'POST', body: JSON.stringify({ text }) }),
   removeRule: (id: string, ruleId: string) =>
     request<{ removed: string; rescreening: boolean }>(`/jobs/${encodeURIComponent(id)}/rules/${encodeURIComponent(ruleId)}`, { method: 'DELETE' }),
-  fromBucket: (jobId: string, role: { title: string; description?: string }, plan: string) =>
+  fromBucket: (jobId: string, role: { title: string; description?: string }, plan: string, rulesFrom?: string) =>
     request<{ job_id: string; accepted_documents: number }>('/jobs/from-bucket', {
-      method: 'POST', body: JSON.stringify({ job_id: jobId, role, plan, rules: [] }),
+      method: 'POST', body: JSON.stringify({ job_id: jobId, role, plan: rulesFrom ? null : plan, rules: [], rules_from: rulesFrom ?? null }),
     }),
-  upload: (files: File[], role: { title: string; description?: string }, plan: string) => {
+  upload: (files: File[], role: { title: string; description?: string }, plan: string, rulesFrom?: string) => {
     const form = new FormData()
     files.forEach((file) => form.append('files', file))
     form.append('role', JSON.stringify(role))
     form.append('rules', '[]')
-    form.append('plan', plan)
+    if (rulesFrom) form.append('rules_from', rulesFrom)
+    else form.append('plan', plan)
     return request<{ job_id: string; accepted_documents: number }>('/jobs', { method: 'POST', body: form })
   },
 }

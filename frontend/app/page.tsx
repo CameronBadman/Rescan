@@ -162,7 +162,7 @@ export default function Page() {
         {activeNav === 'Audit trail' && <AuditView audit={audit} rules={rules} status={status} reviewed={Object.keys(identities).length} roleTitle={roleTitle} jobId={jobId} />}
       </div>
     </section>
-    {showRound && <RoundModal onClose={() => setShowRound(false)} onCreated={async (id) => { setShowRound(false); await refreshJobs(); setJobId(id); setActiveNav('Overview') }} />}
+    {showRound && <RoundModal jobs={jobs} onClose={() => setShowRound(false)} onCreated={async (id) => { setShowRound(false); await refreshJobs(); setJobId(id); setActiveNav('Overview') }} />}
   </main>
 }
 
@@ -294,8 +294,9 @@ function Activity({ audit }: { audit: AuditEntry[] }) {
 
 // New round: a plan in plain language plus resumes, either already in the
 // bucket under jobs/<id>/ or uploaded here.
-function RoundModal({ onClose, onCreated }: { onClose: () => void; onCreated: (jobId: string) => void }) {
+function RoundModal({ jobs, onClose, onCreated }: { jobs: JobSummary[]; onClose: () => void; onCreated: (jobId: string) => void }) {
   const [role, setRole] = useState('Senior Data Engineer')
+  const [rulesFrom, setRulesFrom] = useState<string>('')
   const [source, setSource] = useState<'bucket' | 'upload'>('bucket')
   const [bucketId, setBucketId] = useState('demo')
   const [files, setFiles] = useState<File[]>([])
@@ -305,7 +306,7 @@ function RoundModal({ onClose, onCreated }: { onClose: () => void; onCreated: (j
   const create = async () => {
     setBusy(true); setProblem(null)
     try {
-      const created = source === 'bucket' ? await api.fromBucket(bucketId.trim(), { title: role }, plan) : await api.upload(files, { title: role }, plan)
+      const created = source === 'bucket' ? await api.fromBucket(bucketId.trim(), { title: role }, plan, rulesFrom || undefined) : await api.upload(files, { title: role }, plan, rulesFrom || undefined)
       onCreated(created.job_id)
     } catch (e) {
       setProblem(e instanceof ApiError ? (typeof e.detail === 'string' ? e.detail : (e.detail as any)?.message ?? e.message) : String(e))
@@ -316,7 +317,8 @@ function RoundModal({ onClose, onCreated }: { onClose: () => void; onCreated: (j
       <div className="flex gap-2 text-xs font-semibold">{(['bucket', 'upload'] as const).map((s) => <button key={s} onClick={() => setSource(s)} className={`rounded-lg border px-3 py-2 ${source === s ? 'border-[#19312b] bg-[#e8f0ea]' : 'border-[#dfe7e1] bg-white'}`}>{s === 'bucket' ? 'Resumes already in storage' : 'Upload resumes'}</button>)}</div>
       {source === 'bucket' ? <label className="block text-xs font-semibold">Round ID (folder in storage: jobs/&lt;id&gt;/)<input value={bucketId} onChange={(e) => setBucketId(e.target.value)} className="mt-2 w-full rounded-lg border border-[#dfe7e1] bg-white px-3 py-2.5 font-mono text-sm outline-none focus:border-[#76a383]" /></label>
         : <label className="block text-xs font-semibold">Resumes (PDF, DOCX, TXT or a zip)<input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files ?? []))} className="mt-2 block w-full text-xs" /></label>}
-      <label className="block text-xs font-semibold">Hiring plan<textarea value={plan} onChange={(e) => setPlan(e.target.value)} className="mt-2 min-h-[110px] w-full resize-none rounded-lg border border-[#dfe7e1] bg-white px-3 py-2.5 text-sm leading-6 outline-none focus:border-[#76a383]" /></label>
+      <label className="block text-xs font-semibold">Rules<select value={rulesFrom} onChange={(e) => setRulesFrom(e.target.value)} className="mt-2 w-full rounded-lg border border-[#dfe7e1] bg-white px-3 py-2.5 text-sm outline-none focus:border-[#76a383]"><option value="">Compile from the hiring plan below</option>{jobs.filter((j) => j.status === 'complete').map((j) => <option key={j.id} value={j.id}>Reuse the rules from {j.id}</option>)}</select></label>
+      {!rulesFrom && <label className="block text-xs font-semibold">Hiring plan<textarea value={plan} onChange={(e) => setPlan(e.target.value)} className="mt-2 min-h-[110px] w-full resize-none rounded-lg border border-[#dfe7e1] bg-white px-3 py-2.5 text-sm leading-6 outline-none focus:border-[#76a383]" /></label>}
       <div className="flex items-start gap-3 rounded-lg bg-[#f1f6f1] p-3 text-xs leading-5 text-[#66786d]"><LockKeyhole size={16} className="mt-0.5 shrink-0" />Candidate identities will stay hidden until a human shortlist decision.</div>
       {problem && <p className="rounded-lg bg-[#fdf1ec] p-3 text-xs text-[#8a4a3d]">{problem}</p>}</div>
     <div className="mt-6 flex justify-end gap-3"><button onClick={onClose} className="rounded-lg border border-[#dfe7e1] px-4 py-2.5 text-xs font-semibold">Cancel</button><button onClick={create} disabled={busy || (source === 'upload' && files.length === 0)} className="rounded-lg bg-[#19312b] px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-60">{busy ? 'Starting…' : 'Create hiring round'}</button></div></div></div>

@@ -158,6 +158,7 @@ class BucketJobRequest(BaseModel):
     plan: str | None = Field(default=None, description="The recruiter's hiring plan, free text.")
     rules: list[str] = Field(default_factory=list, description="Discrete rules, in addition to or instead of the plan.")
     prefix: str | None = Field(default=None, description="Override the configured bucket prefix for this job.")
+    rules_from: str | None = Field(default=None, description="Reuse another round's compiled rule set instead of compiling the plan.")
 
 
 class RuleAddRequest(BaseModel):
@@ -316,6 +317,7 @@ async def create_job(
     role: str = Form(..., description="RoleSpec as JSON."),
     rules: str = Form("[]", description="Recruiter rules as a JSON array of strings."),
     plan: str | None = Form(None, description="The recruiter's hiring plan, free text; compiled into rules."),
+    rules_from: str | None = Form(None, description="Reuse another round's compiled rule set instead of compiling the plan."),
 ) -> dict[str, Any]:
     """Accept a bulk upload and start processing. Returns a job id immediately."""
     try:
@@ -334,8 +336,10 @@ async def create_job(
     if not documents:
         raise HTTPException(status_code=400, detail="no usable documents in the upload")
 
+    if rules_from and state.store.get_job(rules_from) is None:
+        raise HTTPException(status_code=404, detail=f"unknown job {rules_from!r} to copy rules from")
     job_id = state.runner.create_job(role_spec, documents)
-    state.pool.submit(_run_job_safely, job_id, rule_texts, plan)
+    state.pool.submit(_run_job_safely, job_id, rule_texts, plan, rules_from)
 
     return {
         "job_id": job_id,
@@ -357,6 +361,8 @@ def create_job_from_bucket(request: BucketJobRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="job_id must be a single path segment")
     if state.store.get_job(job_id) is not None:
         raise HTTPException(status_code=409, detail=f"job {job_id!r} already exists")
+    if request.rules_from and state.store.get_job(request.rules_from) is None:
+        raise HTTPException(status_code=404, detail=f"unknown job {request.rules_from!r} to copy rules from")
 
     try:
         pull = pull_job_documents(state.object_store, job_id, prefix=request.prefix)
@@ -380,7 +386,7 @@ def create_job_from_bucket(request: BucketJobRequest) -> dict[str, Any]:
             "skipped": pull.skipped,
         },
     )
-    state.pool.submit(_run_job_safely, job_id, request.rules, request.plan)
+    state.pool.submit(_run_job_safely, job_id, request.rules, request.plan, request.rules_from)
     return {
         "job_id": job_id,
         "prefix": pull.prefix,
@@ -390,9 +396,9 @@ def create_job_from_bucket(request: BucketJobRequest) -> dict[str, Any]:
     }
 
 
-def _run_job_safely(job_id: str, rule_texts: list[str], plan: str | None = None) -> None:
+def _run_job_safely(job_id: str, rule_texts: list[str], plan: str | None = None, rules_from: str | None = None) -> None:
     try:
-        state.runner.run_job(job_id, rule_texts, plan=plan)
+        state.runner.run_job(job_id, rule_texts, plan=plan, rules_from=rules_from)
     except Exception:
         # run_job already recorded the failure on the job and in the audit log.
         log.exception("background job %s failed", job_id)

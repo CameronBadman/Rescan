@@ -59,7 +59,9 @@ locals {
       # Two keys: one for agents/MCP, one for the frontend, rotatable apart.
       RESCAN_API_KEYS         = "${random_password.api_key.result},${random_password.frontend_key.result}"
       RESCAN_CORS_ORIGINS     = join(",", concat(var.frontend_origins, var.deploy_api ? ["https://${aws_cloudfront_distribution.frontend[0].domain_name}"] : []))
-      RESCAN_PIPELINE_WORKERS = "2"
+      # Candidates processed concurrently. Each is a few sequential model
+      # calls, so this is what keeps vLLM's continuous batching fed.
+      RESCAN_PIPELINE_WORKERS = "12"
     },
     var.llm_settings,
     var.extra_env,
@@ -317,6 +319,12 @@ output "api" {
 output "api_key" {
   sensitive = true
   value     = random_password.api_key.result
+}
+
+output "api_env_file" {
+  description = "Contents of /etc/rescan/env on the instance; scripts/deploy_aws.sh pushes it."
+  sensitive   = true
+  value       = join("\n", [for k, v in local.env_file_lines : "${k}=${v}"])
 }
 
 output "frontend_env" {

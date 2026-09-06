@@ -112,9 +112,15 @@ class PipelineRunner:
     # ------------------------------------------------------------------
 
     def run_job(
-        self, job_id: str, rule_texts: Sequence[str], plan: str | None = None
+        self, job_id: str, rule_texts: Sequence[str], plan: str | None = None,
+        rules_from: str | None = None,
     ) -> dict[str, Any]:
-        """Run a job to completion. Blocking; callers run it in a background task."""
+        """Run a job to completion. Blocking; callers run it in a background task.
+
+        `rules_from` reuses another round's compiled rule set as-is — the
+        rules a recruiter refined on one batch applied to the next — instead of
+        compiling from the plan.
+        """
         job = self.store.get_job(job_id)
         if job is None:
             raise KeyError(f"unknown job {job_id!r}")
@@ -123,7 +129,10 @@ class PipelineRunner:
         self.store.update_job(job_id, status=JobStatus.RUNNING.value)
 
         try:
-            rule_set = self._classify_rules(job_id, rule_texts, role, plan)
+            if rules_from:
+                rule_set = self._copy_rules(job_id, rules_from)
+            else:
+                rule_set = self._classify_rules(job_id, rule_texts, role, plan)
             profiles, screening = self._process_candidates(job_id, rule_set)
             shortlist = self._rank(job_id, role, profiles, screening, rule_set)
         except Exception as exc:  # a job failure must be visible, not silent
@@ -138,6 +147,16 @@ class PipelineRunner:
             detail={"shortlisted": len(shortlist.entries), "excluded": len(shortlist.excluded)},
         )
         return shortlist.model_dump(mode="json")
+
+    def _copy_rules(self, job_id: str, source_job_id: str) -> RuleSet:
+        rule_set = self.rule_set_for(source_job_id)
+        self.store.update_job(job_id, rules_json=rule_set.model_dump_json())
+        self.store.audit(
+            job_id, "rules", "rules_copied",
+            detail={"from_job": source_job_id, "rules": len(rule_set.rules), "applied": len(rule_set.applied),
+                    "flagged": len(rule_set.flagged)},
+        )
+        return rule_set
 
     def _classify_rules(
         self, job_id: str, rule_texts: Sequence[str], role: RoleSpec, plan: str | None = None

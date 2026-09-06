@@ -304,20 +304,21 @@ def list_jobs(limit: int = 20) -> dict[str, Any]:
     title="Start a job from resumes in the bucket",
     description=(
         "Pull the resumes under <prefix>/<job_id>/ in the object store, compile the "
-        "hiring plan and/or rules, and run the whole pipeline: extraction, structuring, "
-        "anonymization, screening, ranking. Returns immediately with the job id; poll "
-        "job_status. The bucket's job id becomes the job id."
+        "hiring plan and/or rules — or reuse another round's compiled rule set with "
+        "rules_from — and run the whole pipeline: extraction, structuring, anonymization, "
+        "screening, ranking. Returns immediately with the job id; poll job_status. The "
+        "bucket's job id becomes the job id."
     ),
 )
 def start_job_from_bucket(
     job_id: str, role_title: str, plan: str | None = None, rules: list[str] | None = None,
-    role_description: str | None = None,
+    role_description: str | None = None, rules_from: str | None = None,
 ) -> dict[str, Any]:
     role = {"title": role_title, "description": role_description}
     api = _api()
     if api is not None:
         try:
-            return api.ok("POST", "/jobs/from-bucket", json={"job_id": job_id, "role": role, "plan": plan, "rules": rules or []})
+            return api.ok("POST", "/jobs/from-bucket", json={"job_id": job_id, "role": role, "plan": plan, "rules": rules or [], "rules_from": rules_from})
         except RemoteError as exc:
             return exc.to_dict()
     from rescan.extract import Extractor
@@ -338,7 +339,7 @@ def start_job_from_bucket(
     runner.create_job(RoleSpec.model_validate(role), pull.documents, job_id=job_id)
     import threading
 
-    threading.Thread(target=lambda: runner.run_job(job_id, rules or [], plan=plan), daemon=True).start()
+    threading.Thread(target=lambda: runner.run_job(job_id, rules or [], plan=plan, rules_from=rules_from), daemon=True).start()
     return {"job_id": job_id, "prefix": pull.prefix, "accepted_documents": len(pull.documents), "skipped": pull.skipped}
 
 
