@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# First boot of the Rescan API instance. Installs the runtime, writes the
+# refresh script that pulls the source archive from S3, and starts Tika and
+# the API under systemd. Later deploys re-run /opt/rescan/refresh.sh over SSM.
+set -euxo pipefail
+
+dnf install -y python3.11 python3.11-pip java-21-amazon-corretto-headless unzip
+useradd --system --home /opt/rescan --shell /sbin/nologin rescan || true
+mkdir -p /opt/rescan /var/lib/rescan /etc/rescan
+chown -R rescan:rescan /var/lib/rescan
+
+cat > /etc/rescan/env <<'ENV'
+${env_file}
+ENV
+chmod 600 /etc/rescan/env
+
+curl -fsSL -o /opt/rescan/tika-server.jar \
+  "https://repo1.maven.org/maven2/org/apache/tika/tika-server-standard/${tika_version}/tika-server-standard-${tika_version}.jar"
+
+cat > /opt/rescan/refresh.sh <<'REFRESH'
+#!/usr/bin/env bash
+# Pull the current source archive and (re)install the API. Safe to re-run.
+set -euxo pipefail
+aws s3 cp "s3://${artifacts_bucket}/${artifact_key}" /tmp/rescan.zip --region ${region}
+rm -rf /opt/rescan/app.new && mkdir -p /opt/rescan/app.new
+unzip -q /tmp/rescan.zip -d /opt/rescan/app.new
+[ -d /opt/rescan/venv ] || python3.11 -m venv /opt/rescan/venv
+/opt/rescan/venv/bin/pip install -q --upgrade pip
+/opt/rescan/venv/bin/pip install -q /opt/rescan/app.new
+rm -rf /opt/rescan/app && mv /opt/rescan/app.new /opt/rescan/app
+chown -R rescan:rescan /opt/rescan
+systemctl restart rescan
+REFRESH
+chmod +x /opt/rescan/refresh.sh
+
+cat > /etc/systemd/system/tika.service <<'UNIT'
+[Unit]
+Description=Apache Tika server
+After=network-online.target
+[Service]
+User=rescan
+ExecStart=/usr/bin/java -Xmx768m -jar /opt/rescan/tika-server.jar --host 127.0.0.1 --port 9998
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/rescan.service <<'UNIT'
+[Unit]
+Description=Rescan API
+After=network-online.target tika.service
+Wants=tika.service
+[Service]
+User=rescan
+EnvironmentFile=/etc/rescan/env
+WorkingDirectory=/opt/rescan/app
+ExecStart=/opt/rescan/venv/bin/uvicorn rescan.api.main:app --host 0.0.0.0 --port 8080 --workers 1 --proxy-headers --forwarded-allow-ips '*'
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now tika
+systemctl enable rescan
+# The archive may not be uploaded yet on first boot; scripts/deploy_aws.sh
+# re-runs the refresh over SSM once it is.
+/opt/rescan/refresh.sh || echo "no source archive yet; waiting for a deploy"
+systemctl status rescan --no-pager || true

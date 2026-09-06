@@ -1,8 +1,13 @@
-"""MCP server exposing the rule engine.
+"""MCP server exposing the rule engine and a job's results.
 
 The legal-risk classifier is useful outside this application: a recruiter
 writing a job ad in any MCP-capable client should be able to check the wording
-before it becomes a screening rule. These tools are read-only and stateless.
+before it becomes a screening rule.
+
+Two modes. In-process (default): the tools run the pipeline code directly
+against the local store. Remote: with RESCAN_MCP_REMOTE_URL (and _KEY) set,
+every tool calls the deployed HTTP API instead, so an agent on a laptop drives
+the real deployment with the same tool surface.
 
 Run it:
 
@@ -15,15 +20,18 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+import httpx
 from mcp.server.mcpserver import MCPServer
 
 from rescan.aqf import AQF_LABELS, map_to_aqf
+from rescan.config import settings
 from rescan.dsl import DslError, parse_expr, parse_program
 from rescan.dsl.fields import reference as dsl_reference
 from rescan.dsl.judge import Judge
 from rescan.llm.client import build_client
 from rescan.pipeline.query import QueryRejected, run_query
 from rescan.rules.classifier import classify_rule, compile_plan
+from rescan.rules.models import ClassifiedRule, RuleSet
 from rescan.rules.statutes import RISK_PATTERNS, STATUTES, statute_citations
 
 server = MCPServer(
@@ -38,6 +46,54 @@ server = MCPServer(
 
 _client = None
 _store = None
+_remote = None
+
+
+class Remote:
+    """The deployed API, as the MCP tools see it."""
+
+    def __init__(self, base_url: str, api_key: str = "", client: httpx.Client | None = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        headers = {"X-API-Key": api_key} if api_key else {}
+        self.client = client or httpx.Client(base_url=self.base_url, headers=headers, timeout=300.0)
+
+    def call(self, method: str, path: str, **kwargs: Any) -> tuple[int, Any]:
+        response = self.client.request(method, path, **kwargs)
+        try:
+            body = response.json()
+        except ValueError:
+            body = {"detail": response.text[:500]}
+        return response.status_code, body
+
+    def ok(self, method: str, path: str, **kwargs: Any) -> Any:
+        status, body = self.call(method, path, **kwargs)
+        if status >= 400:
+            raise RemoteError(status, body)
+        return body
+
+
+class RemoteError(RuntimeError):
+    def __init__(self, status: int, body: Any) -> None:
+        super().__init__(f"API returned {status}")
+        self.status = status
+        self.body = body
+
+    def to_dict(self) -> dict[str, Any]:
+        detail = self.body.get("detail") if isinstance(self.body, dict) else self.body
+        if isinstance(detail, dict) and "kind" in detail:
+            return {"ok": False, "error": detail}
+        kind = {404: "not_found", 401: "unauthorised", 409: "conflict", 422: "invalid"}.get(self.status, "api_error")
+        return {"ok": False, "error": {"kind": kind, "status": self.status, "message": detail}}
+
+
+def _api() -> Remote | None:
+    """The remote API when configured, else None (run in-process)."""
+    global _remote
+    if not settings.mcp_remote_url:
+        return None
+    if _remote is None:
+        _remote = Remote(settings.mcp_remote_url, settings.mcp_remote_key)
+    return _remote
 
 
 def _llm():
@@ -98,6 +154,10 @@ def _rule_payload(rule) -> dict[str, Any]:
     ),
 )
 def check_screening_rule(rule_text: str, role_context: str | None = None) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        body = api.ok("POST", "/rules/check", json={"rules": [rule_text], "role_context": role_context})
+        return _rule_payload(ClassifiedRule.model_validate(body["rules"][0]))
     return _rule_payload(classify_rule(rule_text, _llm(), role_context=role_context))
 
 
@@ -111,7 +171,12 @@ def check_screening_rule(rule_text: str, role_context: str | None = None) -> dic
     ),
 )
 def check_screening_rules(rules: list[str], role_context: str | None = None) -> dict[str, Any]:
-    rule_set = compile_plan(None, _llm(), rule_texts=rules, role_context=role_context)
+    api = _api()
+    if api is not None:
+        body = api.ok("POST", "/rules/check", json={"rules": rules, "role_context": role_context})
+        rule_set = RuleSet.model_validate({"rules": body["rules"], "reasoning": body.get("reasoning")})
+    else:
+        rule_set = compile_plan(None, _llm(), rule_texts=rules, role_context=role_context)
     return {
         "results": [_rule_payload(rule) for rule in rule_set.rules],
         "applied": len(rule_set.applied),
@@ -132,7 +197,14 @@ def check_screening_rules(rules: list[str], role_context: str | None = None) -> 
     ),
 )
 def compile_hiring_plan(plan: str, role_context: str | None = None) -> dict[str, Any]:
-    rule_set = compile_plan(plan, _llm(), role_context=role_context)
+    api = _api()
+    if api is not None:
+        body = api.ok("POST", "/rules/compile", json={"plan": plan, "role_context": role_context})
+        rule_set = RuleSet.model_validate(
+            {"rules": body["rules"], "reasoning": body.get("reasoning"), "source_plan": body.get("source_plan")}
+        )
+    else:
+        rule_set = compile_plan(plan, _llm(), role_context=role_context)
     return {
         "reasoning": rule_set.reasoning,
         "rules": [_rule_payload(rule) for rule in rule_set.rules],
@@ -154,6 +226,9 @@ def compile_hiring_plan(plan: str, role_context: str | None = None) -> dict[str,
     ),
 )
 def describe_query_language() -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        return api.ok("GET", "/dsl/fields")
     return dsl_reference()
 
 
@@ -168,6 +243,12 @@ def describe_query_language() -> dict[str, Any]:
 )
 def parse_query(dsl: str) -> dict[str, Any]:
     text = dsl.strip()
+    api = _api()
+    if api is not None:
+        status, body = api.call("POST", "/dsl/parse", json={"dsl": text})
+        if status >= 400:
+            return RemoteError(status, body).to_dict()
+        return {"ok": True, "kind": body["kind"], "canonical": body["canonical"]}
     try:
         if text[:7].upper().startswith(("REQUIRE", "PREFER")):
             program = parse_program(text)
@@ -189,6 +270,12 @@ def parse_query(dsl: str) -> dict[str, Any]:
     ),
 )
 def query_candidates(job_id: str, dsl: str, model_checks: bool = True) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        try:
+            return api.ok("POST", f"/jobs/{job_id}/query", json={"dsl": dsl, "model_checks": model_checks})
+        except RemoteError as exc:
+            return exc.to_dict()
     judge = Judge(_llm(), ensemble=False) if model_checks else None
     try:
         return run_query(_db(), job_id, dsl, judge=judge, actor="mcp")
@@ -198,6 +285,153 @@ def query_candidates(job_id: str, dsl: str, model_checks: bool = True) -> dict[s
         return {"ok": False, "error": exc.to_dict()}
     except QueryRejected as exc:
         return {"ok": False, "error": exc.to_dict()}
+
+
+@server.tool(
+    name="list_jobs",
+    title="List hiring rounds",
+    description="The jobs the service knows about, newest first, with their status.",
+)
+def list_jobs(limit: int = 20) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        return api.ok("GET", "/jobs", params={"limit": limit})
+    return {"jobs": _db().list_jobs(limit=limit)}
+
+
+@server.tool(
+    name="start_job_from_bucket",
+    title="Start a job from resumes in the bucket",
+    description=(
+        "Pull the resumes under <prefix>/<job_id>/ in the object store, compile the "
+        "hiring plan and/or rules, and run the whole pipeline: extraction, structuring, "
+        "anonymization, screening, ranking. Returns immediately with the job id; poll "
+        "job_status. The bucket's job id becomes the job id."
+    ),
+)
+def start_job_from_bucket(
+    job_id: str, role_title: str, plan: str | None = None, rules: list[str] | None = None,
+    role_description: str | None = None,
+) -> dict[str, Any]:
+    role = {"title": role_title, "description": role_description}
+    api = _api()
+    if api is not None:
+        try:
+            return api.ok("POST", "/jobs/from-bucket", json={"job_id": job_id, "role": role, "plan": plan, "rules": rules or []})
+        except RemoteError as exc:
+            return exc.to_dict()
+    from rescan.extract import Extractor
+    from rescan.ingest import ObjectStoreError, build_object_store, pull_job_documents
+    from rescan.pipeline.runner import PipelineRunner
+    from rescan.schemas import RoleSpec
+
+    store = _db()
+    if store.get_job(job_id) is not None:
+        return {"ok": False, "error": {"kind": "conflict", "message": f"job {job_id!r} already exists"}}
+    try:
+        pull = pull_job_documents(build_object_store(), job_id)
+    except ObjectStoreError as exc:
+        return {"ok": False, "error": {"kind": "object_store", "message": str(exc)}}
+    if not pull.documents:
+        return {"ok": False, "error": {"kind": "not_found", "message": f"no usable documents under {pull.prefix!r}", "skipped": pull.skipped}}
+    runner = PipelineRunner(store, _llm(), Extractor())
+    runner.create_job(RoleSpec.model_validate(role), pull.documents, job_id=job_id)
+    import threading
+
+    threading.Thread(target=lambda: runner.run_job(job_id, rules or [], plan=plan), daemon=True).start()
+    return {"job_id": job_id, "prefix": pull.prefix, "accepted_documents": len(pull.documents), "skipped": pull.skipped}
+
+
+@server.tool(
+    name="job_status",
+    title="Job progress",
+    description="Per-status candidate counts for a job: pending, extracting, ..., complete, needs_manual_review, failed.",
+)
+def job_status(job_id: str) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        try:
+            return api.ok("GET", f"/jobs/{job_id}/status")
+        except RemoteError as exc:
+            return exc.to_dict()
+    job = _db().get_job(job_id)
+    if job is None:
+        return {"ok": False, "error": {"kind": "not_found", "message": f"unknown job {job_id!r}"}}
+    counts = _db().status_counts(job_id)
+    return {"job_id": job_id, "status": job["status"], "counts": counts, "total": sum(counts.values()), "error": job["error"]}
+
+
+@server.tool(
+    name="job_rules",
+    title="A job's compiled rules",
+    description="The compiled rule set for a job: each rule's verdict, risk findings with statutes, the clause in the rule language, and the model's reasoning over the plan.",
+)
+def job_rules(job_id: str) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        try:
+            return api.ok("GET", f"/jobs/{job_id}/rules")
+        except RemoteError as exc:
+            return exc.to_dict()
+    job = _db().get_job(job_id)
+    if job is None:
+        return {"ok": False, "error": {"kind": "not_found", "message": f"unknown job {job_id!r}"}}
+    return job["rules"] or {"rules": []}
+
+
+@server.tool(
+    name="job_shortlist",
+    title="A job's shortlist",
+    description=(
+        "The ranked shortlist with per-criterion scores, the near-misses below the cutoff, "
+        "everyone excluded with the plain-language reason, and everyone sent to manual review. "
+        "Anonymized by default; set reattach_identity=true only for the human reviewer step."
+    ),
+)
+def job_shortlist(job_id: str, reattach_identity: bool = False) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        try:
+            return api.ok("GET", f"/jobs/{job_id}/shortlist", params={"reattach_identity": str(reattach_identity).lower()})
+        except RemoteError as exc:
+            return exc.to_dict()
+    job = _db().get_job(job_id)
+    if job is None:
+        return {"ok": False, "error": {"kind": "not_found", "message": f"unknown job {job_id!r}"}}
+    if job["shortlist"] is None:
+        return {"ok": False, "error": {"kind": "conflict", "message": f"job {job_id!r} has no shortlist yet"}}
+    shortlist = job["shortlist"]
+    if reattach_identity:
+        identities = {
+            c["candidate_ref"]: (c.get("structured") or {}).get("identity", {})
+            for c in _db().list_candidates(job_id) if c.get("candidate_ref")
+        }
+        for section in ("entries", "below_cutoff", "excluded", "manual_review"):
+            for entry in shortlist.get(section, []):
+                entry["identity"] = identities.get(entry["candidate_ref"])
+    return shortlist
+
+
+@server.tool(
+    name="job_audit",
+    title="A job's audit trail",
+    description="The decision trail: plan compiled, rules applied and flagged, redactions, model checks, scores, queries. Filter by event name.",
+)
+def job_audit(job_id: str, event: str | None = None, limit: int = 200) -> dict[str, Any]:
+    api = _api()
+    if api is not None:
+        try:
+            body = api.ok("GET", f"/jobs/{job_id}/audit", params={"limit": 2000})
+        except RemoteError as exc:
+            return exc.to_dict()
+        entries = body["entries"]
+    else:
+        if _db().get_job(job_id) is None:
+            return {"ok": False, "error": {"kind": "not_found", "message": f"unknown job {job_id!r}"}}
+        entries = _db().audit_trail(job_id, limit=2000)
+    if event:
+        entries = [e for e in entries if e["event"] == event]
+    return {"job_id": job_id, "events": sorted({e["event"] for e in entries}), "entries": entries[-limit:]}
 
 
 @server.tool(

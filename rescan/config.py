@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     pipeline_workers: int = 4
     max_retries: int = 1
 
+    # --- MCP server ---
+    # When set, the MCP tools call a deployed Rescan API instead of running the
+    # pipeline in-process, so an agent on a laptop drives the real deployment.
+    mcp_remote_url: str = ""
+    mcp_remote_key: str = ""
+
     # --- auth ---
     # Comma-separated in the environment: RESCAN_API_KEYS=key1,key2
     # Empty disables authentication, which is intended for local development

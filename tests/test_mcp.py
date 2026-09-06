@@ -138,3 +138,101 @@ async def test_query_candidates_over_a_processed_job(tmp_path, monkeypatch, samp
     refused = unwrap(await server.call_tool("query_candidates", {"job_id": "job_mcp", "dsl": 'ASK "Is the candidate a recent graduate?"'}))
     assert refused["ok"] is False and refused["error"]["kind"] == "legal"
     store.close()
+
+
+# --------------------------------------------------------------------------
+# Remote mode: the same tools against a deployed API
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def remote(monkeypatch, tmp_path):
+    """Point the MCP server at a fake deployed API: our own app under a test client."""
+    from fastapi.testclient import TestClient
+    import rescan.mcp_server as mcp_module
+    from rescan.api.main import app
+    from rescan.config import settings
+
+    monkeypatch.setattr(settings, "db_path", tmp_path / "remote.db")
+    monkeypatch.setattr(settings, "upload_dir", tmp_path / "uploads")
+    monkeypatch.setattr(settings, "object_store", "local")
+    monkeypatch.setattr(settings, "local_object_store_dir", tmp_path / "bucket")
+    calls = []
+
+    class Recording(TestClient):
+        def request(self, method, url, **kwargs):
+            calls.append((method, str(url)))
+            return super().request(method, url, **kwargs)
+
+    client = Recording(app, base_url="http://deployed", headers={"X-API-Key": "k"})
+    client.__enter__()
+    monkeypatch.setattr(settings, "mcp_remote_url", "http://deployed")
+    monkeypatch.setattr(settings, "mcp_remote_key", "k")
+    monkeypatch.setattr(mcp_module, "_remote", mcp_module.Remote("http://deployed", "k", client=client))
+    yield calls
+    monkeypatch.setattr(mcp_module, "_remote", None)
+    client.__exit__(None, None, None)
+
+
+async def test_remote_mode_routes_rule_tools_through_the_api(remote):
+    if True:
+        one = unwrap(await server.call_tool("check_screening_rule", {"rule_text": "Must be a native English speaker"}))
+        assert one["verdict"] == "risky"
+        plan = unwrap(await server.call_tool("compile_hiring_plan", {"plan": "Must have 5+ years experience. Nice to have: Kubernetes."}))
+        assert plan["requirements"] == 1 and plan["preferences"] == 1 and plan["reasoning"]
+        parsed = unwrap(await server.call_tool("parse_query", {"dsl": 'region = "x"'}))
+        assert parsed["ok"] is False and parsed["error"]["forbidden"] is True
+        ref = unwrap(await server.call_tool("describe_query_language", {}))
+        assert ref["counts"]["fields"] >= 60
+    assert [c[1].rsplit("deployed", 1)[-1] for c in remote] == ["/rules/check", "/rules/compile", "/dsl/parse", "/dsl/fields"]
+
+
+async def test_remote_mode_job_tools(remote, tmp_path, samples):
+    from rescan.ingest import LocalObjectStore
+
+    store = LocalObjectStore(tmp_path / "bucket")
+    for path in sorted(samples.glob("*.txt"))[:3]:
+        store.put_object(f"jobs/agent-1/{path.name}", path.read_bytes())
+
+    if True:
+        started = unwrap(await server.call_tool(
+            "start_job_from_bucket",
+            {"job_id": "agent-1", "role_title": "Engineer", "plan": "Must have 2+ years experience."},
+        ))
+        assert started["accepted_documents"] == 3
+        import time
+        for _ in range(200):
+            status = unwrap(await server.call_tool("job_status", {"job_id": "agent-1"}))
+            if status["status"] in {"complete", "failed"}:
+                break
+            time.sleep(0.05)
+        assert status["status"] == "complete"
+        rules = unwrap(await server.call_tool("job_rules", {"job_id": "agent-1"}))
+        assert rules["rules"][0]["dsl"] == "REQUIRE years_experience >= 2"
+        shortlist = unwrap(await server.call_tool("job_shortlist", {"job_id": "agent-1"}))
+        assert "identity" not in (shortlist["entries"] + shortlist["excluded"])[0], "anonymized by default"
+        audit = unwrap(await server.call_tool("job_audit", {"job_id": "agent-1", "event": "plan_compiled"}))
+        assert audit["entries"] and "plan_compiled" in audit["events"]
+        listed = unwrap(await server.call_tool("list_jobs", {}))
+        assert any(j["id"] == "agent-1" for j in listed["jobs"])
+        missing = unwrap(await server.call_tool("job_status", {"job_id": "nope"}))
+        assert missing["ok"] is False and missing["error"]["kind"] == "not_found"
+        again = unwrap(await server.call_tool("start_job_from_bucket", {"job_id": "agent-1", "role_title": "Engineer"}))
+        assert again["ok"] is False and again["error"]["kind"] == "conflict"
+
+
+async def test_local_mode_job_tools_report_missing_jobs():
+    import rescan.mcp_server as mcp_module
+    from rescan.store import Store
+    import tempfile, pathlib
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(pathlib.Path(tmp) / "l.db")
+        mcp_module._store = store
+        try:
+            assert unwrap(await server.call_tool("job_status", {"job_id": "nope"}))["ok"] is False
+            assert unwrap(await server.call_tool("job_shortlist", {"job_id": "nope"}))["ok"] is False
+            assert unwrap(await server.call_tool("list_jobs", {}))["jobs"] == []
+        finally:
+            mcp_module._store = None
+            store.close()

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "rescan": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "rescan.mcp_server"],
+      "env": {}
+    }
+  }
+}
