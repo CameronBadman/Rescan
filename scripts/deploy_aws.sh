@@ -25,10 +25,14 @@ git archive --format=zip -o "$archive" "$REF"
 echo "uploading $(git rev-parse --short "$REF") ($(du -h "$archive" | cut -f1)) to s3://$BUCKET/rescan.zip"
 aws s3 cp "$archive" "s3://$BUCKET/rescan.zip" --region "$REGION" --only-show-errors
 
-echo "refreshing $INSTANCE over SSM"
+# The environment file comes from Terraform, so a settings change (a new
+# key, CORS origin, LLM endpoint) is a deploy, not an instance replacement.
+env_b64="$($TF output -raw api_env_file | base64 -w0)"
+[ -n "$env_b64" ] || { echo "terraform output api_env_file is empty; run terraform apply first" >&2; exit 1; }
+echo "refreshing $INSTANCE over SSM (env + source)"
 command_id="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE" \
   --document-name AWS-RunShellScript \
-  --parameters 'commands=["/opt/rescan/refresh.sh"]' \
+  --parameters "commands=[\"echo $env_b64 | base64 -d > /etc/rescan/env && chmod 600 /etc/rescan/env\",\"/opt/rescan/refresh.sh\"]" \
   --query 'Command.CommandId' --output text)"
 
 for _ in $(seq 1 60); do
